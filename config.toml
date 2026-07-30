@@ -1,0 +1,181 @@
+# =============================================================================
+# Dataset Generator — configuration
+#
+# EVERYTHING HERE RUNS AGAINST A **LOCAL LLM**. No cloud provider is contacted
+# for generation or embeddings. The only outbound traffic is to the sources you
+# explicitly list (web crawl targets, your Confluence host).
+# =============================================================================
+
+[project]
+name         = "pcai-dataset"
+description  = "Training/RAG dataset for the Kalam PCAI assistant"
+data_dir     = "data"          # relative to this file
+language     = "en"
+
+# -----------------------------------------------------------------------------
+# LOCAL LLM. Default is Ollama on this machine.
+#   ollama serve
+#   ollama pull nomic-embed-text          # needed for semantic dedupe
+#
+# `model` is set to qwen2.5-coder:7b because it is already installed here and
+# is reliable at emitting the strict JSON these prompts ask for. gemma4:latest
+# (9.6 GB) gives noticeably better answers if you can spare the VRAM/time —
+# swap it in and re-run. Check what you have with: python -m datagen doctor
+#
+# `provider = "openai_compat"` works for LM Studio / llama.cpp / vLLM — still
+# local, just a different URL. There is deliberately no hosted-API provider.
+# -----------------------------------------------------------------------------
+[llm]
+provider     = "ollama"                    # ollama | openai_compat | none
+base_url     = "http://localhost:11434"
+model        = "qwen2.5-coder:7b"
+temperature  = 0.2
+num_ctx      = 8192
+timeout      = 180
+max_retries  = 2
+# When the local model is down, the pipeline does NOT fail: it falls back to
+# deterministic extractive generation. Set false to hard-fail instead.
+allow_extractive_fallback = true
+
+[llm.embeddings]
+enabled  = true
+model    = "nomic-embed-text"
+# Embeddings are used for semantic near-duplicate detection and coverage gaps.
+
+# -----------------------------------------------------------------------------
+# Chunking
+# -----------------------------------------------------------------------------
+[chunking]
+max_chars     = 1600
+overlap       = 200
+min_chars     = 220        # drop fragments smaller than this
+respect_headings = true
+
+# -----------------------------------------------------------------------------
+# Deduplication
+# -----------------------------------------------------------------------------
+[dedupe]
+exact          = true
+near           = true
+simhash_bits   = 6      # max hamming distance treated as a near-duplicate
+semantic       = true   # requires embeddings
+semantic_threshold = 0.94
+
+# -----------------------------------------------------------------------------
+# Generation: what kinds of records to synthesise from each chunk
+# -----------------------------------------------------------------------------
+[generation]
+kinds              = ["qa", "instruction", "troubleshooting"]
+pairs_per_chunk    = 3
+max_workers        = 4
+include_citations  = true       # every record carries source url/title/chunk id
+skip_if_unchanged  = true       # incremental: only regenerate for changed chunks
+
+# -----------------------------------------------------------------------------
+# Quality gate (LLM-as-judge, also local)
+# -----------------------------------------------------------------------------
+[quality]
+enabled          = true
+min_score        = 0.6      # 0..1, records below this are quarantined not deleted
+require_grounded = true     # answer must be supported by its source chunk
+max_answer_chars = 2000
+min_question_chars = 12
+
+# -----------------------------------------------------------------------------
+# SOURCES
+# -----------------------------------------------------------------------------
+
+# Local documents: PDFs, DOCX, PPTX, XLSX, MD, TXT, HTML, CSV, JSON, code.
+[[sources.files]]
+name    = "local-docs"
+path    = "corpus/docs"
+globs   = ["**/*.pdf", "**/*.docx", "**/*.pptx", "**/*.md", "**/*.txt", "**/*.html"]
+tags    = ["docs"]
+
+# Runbooks get their own connector: procedures are parsed step-wise so the
+# generated records preserve ordering and preconditions.
+[[sources.runbooks]]
+name    = "ops-runbooks"
+path    = "corpus/runbooks"
+globs   = ["**/*.md", "**/*.txt", "**/*.pdf"]
+tags    = ["runbook", "ops"]
+
+# Confluence. Credentials come from the environment, never from this file:
+#   CONFLUENCE_BASE_URL, CONFLUENCE_USER, CONFLUENCE_TOKEN
+[[sources.confluence]]
+name       = "engineering-space"
+enabled    = false               # flip to true once creds are in .env
+spaces     = ["PCAI", "OPS"]
+cql        = ""                  # optional raw CQL; overrides `spaces`
+max_pages  = 500
+include_attachments = true       # pulls PDF/DOCX attachments through the file parsers
+tags       = ["confluence"]
+
+# Direct web crawl targets.
+[[sources.web]]
+name       = "hpe-pcai-docs"
+enabled    = true
+seeds      = [
+  "https://developer.hpe.com/platform/hpe-private-cloud-ai/home/",
+]
+allow_domains = ["developer.hpe.com", "docs.ai-solutions.ext.hpe.com"]
+deny_patterns = ["/login", "/search", "\\.zip$", "\\.png$"]
+max_pages  = 60
+max_depth  = 2
+delay_ms   = 800                 # be polite
+respect_robots = true
+tags       = ["web", "vendor-docs"]
+
+# Keyword-driven discovery: the agent searches the web for these and decides
+# what is worth scraping. Add a keyword and re-run — it expands on its own.
+[sources.keywords]
+enabled  = true
+engine   = "duckduckgo"          # duckduckgo | searxng
+searxng_url = "http://localhost:8888"
+results_per_keyword = 8
+max_pages_per_keyword = 10
+terms = [
+  "HPE Private Cloud AI troubleshooting",
+  "MLIS deployment error",
+  "Pachyderm MLDM pipeline failure",
+]
+
+# -----------------------------------------------------------------------------
+# Agent: the autonomous controller
+# -----------------------------------------------------------------------------
+[agent]
+enabled        = true
+max_steps      = 24
+max_tool_errors = 5
+# Objective the planner optimises for. Plain English — it is fed to the local LLM.
+objective = """
+Build and continuously improve a high-quality dataset about HPE Private Cloud AI:
+its architecture, installation, day-2 operations, and above all how to diagnose
+and fix errors. Prefer primary vendor documentation and internal runbooks over
+blogs. Find and close coverage gaps.
+"""
+# Self-improvement: after each run the agent proposes new keywords/URLs from
+# gaps it found. Written to data/state.db and used on the next run.
+propose_new_sources = true
+max_proposed_per_run = 10
+
+# -----------------------------------------------------------------------------
+# Scheduler: "it updates itself"
+# -----------------------------------------------------------------------------
+[schedule]
+enabled       = false
+interval_min  = 360           # re-check every 6h
+full_rebuild_every = 14       # every Nth cycle, ignore caches and rebuild
+jitter_pct    = 10
+
+# -----------------------------------------------------------------------------
+# Export
+# -----------------------------------------------------------------------------
+[export]
+formats   = ["jsonl", "alpaca", "sharegpt", "chatml", "rag_chunks"]
+out_dir   = "exports"
+split     = { train = 0.9, eval = 0.1 }
+shuffle_seed = 42
+# Push straight into the Kalam PCAI assistant's learned-docs file so the
+# existing chatbot picks it up on the next "Train".
+kalam_kb_path = "../server/pcai/learned.json"

@@ -1,0 +1,9 @@
+.env
+# data/
+# exports/
+# corpus/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/

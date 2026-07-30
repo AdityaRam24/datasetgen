@@ -1,0 +1,21 @@
+# The generator runs on the standard library alone — every import below is
+# OPTIONAL and probed at runtime. Missing ones degrade gracefully (a built-in
+# fallback parser is used, or the source type is skipped with a warning).
+#
+#   pip install -r requirements.txt
+#
+# Check what is active at any time with:  python -m datagen doctor
+
+# --- Document parsing -------------------------------------------------------
+pypdf>=4.2.0            # PDF text (fallback: built-in zlib/FlateDecode extractor)
+python-docx>=1.1.0      # .docx      (fallback: built-in OOXML unzip+regex)
+python-pptx>=0.6.23     # .pptx      (fallback: built-in OOXML unzip+regex)
+openpyxl>=3.1.2         # .xlsx      (fallback: built-in OOXML unzip+regex)
+
+# --- Web extraction ---------------------------------------------------------
+beautifulsoup4>=4.12.0  # HTML -> text (fallback: built-in HTMLParser stripper)
+lxml>=5.2.0             # faster bs4 backend
+trafilatura>=1.9.0      # boilerplate removal, much cleaner article text
+
+# --- Nice to have -----------------------------------------------------------
+numpy>=1.26.0           # vectorised cosine similarity for semantic dedupe

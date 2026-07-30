@@ -1,0 +1,274 @@
+# Dataset Generator
+
+An **agentic dataset generator** that reads your documents, scrapes the web, pulls your
+runbooks and Confluence pages, and turns all of it into a deduplicated, quality-gated,
+citation-carrying dataset — then keeps itself up to date on a schedule.
+
+> ### It runs on a LOCAL LLM
+> Generation, quality judging and embeddings all go to **Ollama on your own machine**.
+> Your runbooks, internal wiki pages and error logs never leave the box. There is no
+> cloud provider in this codebase, and `config.py` warns you if `llm.base_url` is not a
+> local or private address. Set `provider = "none"` and it still produces a dataset —
+> just extractively instead of with a model.
+
+---
+
+## Quick start
+
+```bash
+cd dataset-generation
+
+# 0. Optional but recommended parsers (it runs without them — see "Fallbacks")
+pip install -r requirements.txt
+
+# 1. Make sure the local model is up
+ollama serve
+ollama pull nomic-embed-text        # for semantic dedupe
+
+# 2. Check everything before you spend GPU time on it
+python -m datagen doctor
+
+# 3. Build from the sample corpus that ships with the repo
+python -m datagen build
+
+# 4. Look at what it produced
+python -m datagen inspect -n 5
+python -m datagen status
+```
+
+Output lands in `exports/` — `train.jsonl`, `eval.jsonl`, plus alpaca/sharegpt/chatml
+variants and `rag_chunks.jsonl`.
+
+---
+
+## What it does
+
+```
+              ┌─────────── SOURCES ────────────┐
+   PDFs ─┐    │  files      local documents    │
+  DOCX  ─┤    │  runbooks   procedures         │        ┌── quality gate ──┐
+  PPTX  ─┼───▶│  confluence your wiki          │───┐    │ heuristics       │
+   web  ─┤    │  web        crawl + robots.txt │   │    │ grounding check  │
+keyword ─┘    │  keywords   search & scrape    │   │    │ local LLM judge  │
+              └────────────────────────────────┘   │    └──────────────────┘
+                                                   ▼             │
+                        documents ─▶ chunks ─▶ dedupe ─▶ generate ─▶ accepted
+                                                (3 layers)  (local)      │
+                                                                         ▼
+                                              exports/  +  server/pcai/learned.json
+```
+
+**Everything is incremental.** Content hashes live in SQLite, so a re-run skips documents
+that have not changed and only regenerates what actually moved.
+
+---
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `doctor` | Checks the local model, which parsers are active, whether each source resolves |
+| `build` | One pass over every configured source. `--full` ignores caches, `--only files runbooks` narrows it, `--limit 20` caps chunks for a quick test |
+| `agent` | The agent plans its own sequence of tool calls toward the objective in `config.toml` |
+| `scrape "<keyword>"` | Search the web for one keyword and ingest the best results |
+| `ingest <path>` | Ingest a file or folder. `--runbook` parses procedures structurally |
+| `confluence` | Pull the configured spaces (`--space OPS PCAI --attachments`) |
+| `watch` | Run forever, updating itself. `--once` for a single cycle |
+| `export` | Re-export from `data/` without regenerating anything |
+| `status` | Totals, run history, and the leads queued for next time |
+| `inspect` | Print sample records. `--rejected` shows what the quality gate threw out |
+
+---
+
+## The agentic part
+
+`python -m datagen agent` runs an **observe → plan → act** loop. The local model is given
+the objective, the tool list and a scratchpad of what has happened so far, and picks one
+tool per step:
+
+| Tool | |
+|---|---|
+| `search_web` | See what exists for a query without downloading it |
+| `scrape_keyword` | Search *and* download the best-ranked pages |
+| `scrape_url` / `crawl_site` | One page, or breadth-first across a docs site |
+| `ingest_files` / `ingest_runbooks` | Local documents and procedures |
+| `search_confluence` | CQL or free-text against your wiki, attachments included |
+| `build_dataset` | Chunk → dedupe → generate → quality gate |
+| `assess_coverage` | What is covered, what is thin |
+| `propose_sources` | Save leads for the next run |
+| `export_dataset` / `finish` | Land the work and stop |
+
+Guard rails, because a 7B planner will absolutely try all of these: a step budget, a
+consecutive-error budget, a repeat detector that blocks identical calls, and a
+**heuristic planner** that takes over if the model returns garbage three times running.
+The heuristic planner drives the same tools in a fixed sensible order, so
+`agent` still works with no model at all.
+
+### How it updates itself
+
+1. `watch` wakes on `schedule.interval_min` and re-runs.
+2. Unchanged documents are skipped by content hash; changed ones have their stale chunks
+   and records dropped and regenerated.
+3. After each run the agent asks the local model *what is missing*, and writes concrete
+   keywords/URLs into the `discovered` table.
+4. The next run's web and keyword connectors pick those up automatically.
+5. Every `full_rebuild_every` cycles it rebuilds from scratch to clear any drift.
+
+```bash
+python -m datagen watch --interval 360      # every 6 hours
+python -m datagen watch --once --no-agent   # one plain pipeline cycle
+```
+
+On Windows, run it under Task Scheduler or NSSM. Interrupting it is always safe — state
+is committed to SQLite after every step.
+
+---
+
+## Sources
+
+Configure in `config.toml`. Each block has a `name` and optional `tags` that follow the
+data all the way into the exported records.
+
+**`[[sources.files]]`** — PDF, DOCX, PPTX, XLSX, MD, TXT, HTML, CSV, JSON, code.
+Drop files into `corpus/docs/`.
+
+**`[[sources.runbooks]]`** — parsed *structurally*, not as flat text. The connector
+recognises symptom / cause / preconditions / steps / verification / rollback / escalation
+sections, extracts ordered steps and referenced commands, and re-emits a normalised
+document. That is why generated troubleshooting records keep the step order instead of
+producing "run the drain command" with no context. See
+`corpus/runbooks/mlis-endpoint-unavailable.md` for the shape it reads best.
+
+**`[[sources.confluence]]`** — Cloud and Server/DC. Storage-format XHTML is cleaned with
+macros *unwrapped* rather than dropped, so code blocks, info/warning panels and status
+labels survive. PDF/DOCX attachments are pulled through the same parsers.
+
+```bash
+# .env
+CONFLUENCE_BASE_URL=https://your-org.atlassian.net/wiki
+CONFLUENCE_USER=you@example.com     # leave empty for a Server/DC PAT
+CONFLUENCE_TOKEN=...
+```
+
+**`[[sources.web]]`** — breadth-first crawl with a domain allow-list, deny patterns,
+robots.txt, per-host delay, and hard caps on pages/depth/size. Linked PDFs are parsed,
+not skipped.
+
+**`[sources.keywords]`** — the "find everything about X" path. Searches DuckDuckGo's
+no-JS endpoint (or your own SearXNG), ranks results — vendor docs and `docs.*` hosts up,
+Pinterest/Quora and tag-archive pages out — then scrapes the winners.
+
+---
+
+## Quality
+
+Duplicated chunks become duplicated training rows, and a confident wrong answer is worse
+than no answer. So:
+
+**Dedupe, three layers.** Exact (sha256 of normalised text) → near (64-bit SimHash with a
+banded index, so it is not O(n²)) → semantic (cosine over local embeddings). Layer 2 is
+what kills the boilerplate headers and version-bumped duplicate pages a crawl produces in
+bulk. Dedupe runs against *history*, not just the current batch.
+
+**Quality gate, cheap checks first.** Length bounds, questions that reference "the text
+above", non-answers, page chrome, unbalanced code fences, garbled extraction → then a
+grounding score (how much of the answer's content, especially its numbers, flags and
+paths, appears in the source chunk) → then the local model scoring faithfulness,
+usefulness and self-containment.
+
+Rejected records are **quarantined, not deleted** — they go to `data/quarantine.jsonl`
+with a reason so you can tune `quality.min_score` rather than guess:
+
+```bash
+python -m datagen inspect --rejected -n 10
+```
+
+**Train/eval split is by source document**, never by row. Rows from one chunk are
+near-duplicates; letting them straddle the split gives you an eval number that means
+nothing.
+
+---
+
+## Output formats
+
+| File | Use |
+|---|---|
+| `dataset.jsonl` | Everything: scores, reasons, provenance, source context |
+| `train.jsonl` / `eval.jsonl` | The split, without source context |
+| `train.alpaca.jsonl` | `{instruction, input, output}` — classic SFT |
+| `train.sharegpt.jsonl` | axolotl / LLaMA-Factory |
+| `train.chatml.jsonl` | OpenAI-style `{messages:[...]}` |
+| `rag_chunks.jsonl` | The chunks themselves, for retrieval instead of fine-tuning |
+| `manifest.json` | Counts by kind and source, mean score, which model generated it |
+
+### Feeding the Kalam PCAI assistant
+
+`export.kalam_kb_path` points at `../server/pcai/learned.json`, the `LearnedDoc[]` the
+existing PCAI chatbot already reads. Every export writes chunks and troubleshooting cases
+there, tagged `datagen://<dataset>/`, replacing only its own previous entries and leaving
+anything you added through the Kalam UI alone. Hit **Train** in the PCAI panel (or
+`kalam train`) and the chatbot picks it up.
+
+---
+
+## Fallbacks — why this does not break
+
+Every dependency is optional and probed at runtime:
+
+| Missing | What happens |
+|---|---|
+| **The local model is down** | Extractive generation: headings become questions, ordered steps become procedures, error lines become troubleshooting prompts. Grounded by construction — the answer *is* the source text. Set `allow_extractive_fallback = false` to hard-fail instead |
+| `pypdf` | A built-in extractor inflates FlateDecode streams and reads the text operators. Fine for digital PDFs, no OCR |
+| `python-docx` / `python-pptx` / `openpyxl` | Built-in OOXML unzip-and-strip |
+| `trafilatura` / `bs4` | Built-in `HTMLParser` stripper that drops script/style/nav |
+| Embeddings unavailable | Semantic dedupe off, exact + SimHash still run |
+| Search engine blocked | The keyword is saved as a lead and retried next run |
+| A source raises | Logged, that source is skipped, the run continues |
+
+`python -m datagen doctor` tells you which path each one is on.
+
+---
+
+## Layout
+
+```
+dataset-generation/
+├── config.toml              all configuration
+├── .env.example             credentials (never in config.toml)
+├── corpus/                  your documents go here
+├── data/                    state.db, records.jsonl, quarantine.jsonl
+├── exports/                 the dataset
+├── tests/test_datagen.py    31 tests, no network, no LLM
+└── datagen/
+    ├── __main__.py          CLI
+    ├── config.py            TOML + env, local-address guard
+    ├── llm.py               Ollama / OpenAI-compatible client
+    ├── state.py             SQLite: hashes, records, leads, run history
+    ├── chunking.py          heading-aware chunking
+    ├── dedupe.py            simhash + banded index + semantic
+    ├── generators.py        prompts + extractive fallbacks
+    ├── quality.py           heuristics, grounding, LLM judge
+    ├── exporters.py         all output formats + Kalam bridge
+    ├── pipeline.py          the build
+    ├── connectors/          parsers, files, runbooks, web, search, confluence
+    └── agent/               loop, tools, scheduler
+```
+
+Tests: `python tests/test_datagen.py` (or `python -m pytest tests -q`).
+
+---
+
+## Tuning
+
+**Better output**: raise `generation.pairs_per_chunk`, or switch `llm.model` to a bigger
+local model — `gemma4:latest` (9.6 GB) is noticeably better than the 7B default here at
+the cost of speed. Check what you have with `doctor`.
+
+**Faster**: lower `generation.max_workers` if the GPU is thrashing — a local model is one
+process on one GPU, and more than ~4 concurrent requests usually makes it *slower*, not
+faster. Use `build --limit 20` to sanity-check prompt changes before a full run.
+
+**Too much rejected**: `inspect --rejected` first. If the reasons are `ungrounded`, the
+model is inventing — use a bigger model or lower `chunking.max_chars`. If they are
+heuristic rejections, the source text is probably navigation chrome and the fix is a
+tighter `deny_patterns`.
