@@ -5,16 +5,35 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Dataset Manager</title>
 <style>
+  /* HPE design language — the same tokens as the Kalam UI.
+     Brand green #01A982, light theme default, refined dark on preference. */
   :root {
-    --bg: #0f1216; --panel: #161b22; --panel2: #1c232c; --line: #2a323d;
-    --fg: #e6edf3; --dim: #8b98a5; --accent: #4a9eff; --ok: #3fb950;
-    --warn: #d29922; --err: #f85149; --radius: 10px;
+    --hpe-green: #01A982;
+    --hpe-green-hover: #018768;
+    --hpe-green-dim: rgba(1, 169, 130, 0.10);
+    --hpe-green-glow: rgba(1, 169, 130, 0.18);
+    --hpe-green-border: rgba(1, 169, 130, 0.35);
+    --on-accent: #FFFFFF;
+
+    --bg: #EEF1F5; --panel: #FFFFFF; --panel2: #F3F5F8;
+    --line: #DDE3EA; --line-strong: #C6CFD8;
+    --fg: #1C2733; --dim: #55636F; --muted: #8592A0; --heading: #101820;
+    --accent: var(--hpe-green);
+    --ok: #01A982; --warn: #E07000; --err: #E5484D;
+    --warn-bg: rgba(224, 112, 0, 0.10); --warn-border: rgba(224, 112, 0, 0.32);
+    --code-bg: #0E1721; --code-text: #3DDC97;
+    --shadow: 0 1px 2px rgba(16, 24, 32, 0.06), 0 2px 8px rgba(16, 24, 32, 0.04);
+    --radius: 10px;
   }
-  @media (prefers-color-scheme: light) {
+  @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #f6f8fa; --panel: #fff; --panel2: #f0f3f6; --line: #d8dee4;
-      --fg: #1f2328; --dim: #656d76; --accent: #0969da; --ok: #1a7f37;
-      --warn: #9a6700; --err: #cf222e;
+      --bg: #0C0F14; --panel: #14181F; --panel2: #1B212B;
+      --line: rgba(255, 255, 255, 0.09); --line-strong: rgba(255, 255, 255, 0.16);
+      --fg: #E7ECF1; --dim: #9BA8B4; --muted: #667180; --heading: #FFFFFF;
+      --warn: #FF8300;
+      --warn-bg: rgba(255, 131, 0, 0.10); --warn-border: rgba(255, 131, 0, 0.30);
+      --code-bg: #0A0D12;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.35);
     }
   }
   * { box-sizing: border-box; }
@@ -37,7 +56,7 @@
     font-size: 11.5px; padding: 3px 9px; border-radius: 20px;
     border: 1px solid var(--line); background: var(--panel2); white-space: nowrap;
   }
-  .pill.on  { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
+  .pill.on  { color: var(--ok);   border-color: var(--hpe-green-border); }
   .pill.off { color: var(--err);  border-color: color-mix(in srgb, var(--err) 40%, var(--line)); }
   .pill.busy{ color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
 
@@ -60,6 +79,8 @@
   }
   .card h2 { margin: 0 0 4px; font-size: 14px; font-weight: 650; }
   .card p.hint { margin: 0 0 14px; color: var(--dim); font-size: 12.5px; }
+  .card { box-shadow: var(--shadow); }
+  .card h2 { color: var(--heading); }
   .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 
   .stat { background: var(--panel2); border: 1px solid var(--line);
@@ -68,10 +89,11 @@
   .stat .l { color: var(--dim); font-size: 12px; margin-top: 2px; }
 
   button.btn, .btn {
-    background: var(--accent); color: #fff; border: 0; border-radius: 7px;
+    background: var(--accent); color: var(--on-accent); border: 0; border-radius: 7px;
     padding: 8px 15px; font-size: 13px; cursor: pointer; font-weight: 550;
   }
-  button.btn:hover { filter: brightness(1.1); }
+  button.btn:hover { background: var(--hpe-green-hover); }
+  button.ghost:hover { border-color: var(--hpe-green); color: var(--hpe-green); }
   button.btn:disabled { opacity: .45; cursor: not-allowed; filter: none; }
   button.ghost { background: var(--panel2); color: var(--fg); border: 1px solid var(--line); }
   button.danger { background: var(--err); }
@@ -89,10 +111,10 @@
     border: 2px dashed var(--line); border-radius: var(--radius); padding: 32px 20px;
     text-align: center; color: var(--dim); cursor: pointer; transition: .15s;
   }
-  #drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  #drop.over { border-color: var(--hpe-green); background: var(--hpe-green-dim); }
 
   #log {
-    background: #0a0d11; color: #c9d5e1; border: 1px solid var(--line);
+    background: var(--code-bg); color: #C9D5E1; border: 1px solid var(--line);
     border-radius: var(--radius); padding: 12px; height: 340px; overflow-y: auto;
     font-family: ui-monospace, Consolas, monospace; font-size: 12px; line-height: 1.5;
   }
@@ -116,27 +138,51 @@
 
   .msg { padding: 9px 12px; border-radius: 7px; margin-bottom: 12px; font-size: 13px; display: none; }
   .msg.show { display: block; }
-  .msg.ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
-  .msg.err { background: color-mix(in srgb, var(--err) 15%, transparent); color: var(--err); }
-  .warnbox { background: color-mix(in srgb, var(--warn) 12%, transparent);
-             border-left: 3px solid var(--warn); padding: 10px 12px;
-             border-radius: 0 7px 7px 0; margin-bottom: 10px; font-size: 13px; }
+  .msg.ok { background: var(--hpe-green-dim); color: var(--ok); border: 1px solid var(--hpe-green-border); }
+  .msg.err { background: rgba(229, 72, 77, 0.10); color: var(--err); border: 1px solid rgba(229, 72, 77, 0.32); }
+  .warnbox { background: var(--warn-bg); border: 1px solid var(--warn-border);
+             padding: 10px 12px; border-radius: 8px; margin-bottom: 10px;
+             font-size: 12px; color: var(--dim); display: flex; gap: 8px; }
+  .warnbox::before { content: '!'; color: var(--warn); font-weight: 700; flex-shrink: 0; }
   .empty { color: var(--dim); text-align: center; padding: 28px; font-size: 13px; }
   .kwrow { display: flex; gap: 8px; margin-bottom: 7px; }
   .spin { display: inline-block; width: 11px; height: 11px; border: 2px solid var(--line);
           border-top-color: var(--accent); border-radius: 50%; animation: s .7s linear infinite; }
   @keyframes s { to { transform: rotate(360deg); } }
 
-  .modelgrid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); }
-  .model {
-    border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px;
-    background: var(--panel2); cursor: pointer; transition: .12s;
+  /* Model picker — mirrors the Kalam ModelPicker: a header row with Rescan,
+     a select, and quick-pick chips underneath. */
+  .pickhead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .picktitle { font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+  .badge {
+    font-size: 9px; text-transform: uppercase; letter-spacing: .04em;
+    background: var(--panel2); border: 1px solid var(--line); color: var(--muted);
+    border-radius: 4px; padding: 1px 5px;
   }
-  .model:hover { border-color: var(--accent); }
-  .model.sel { border-color: var(--accent);
-               background: color-mix(in srgb, var(--accent) 12%, var(--panel2)); }
-  .model .nm { font-weight: 570; font-size: 13px; word-break: break-all; }
-  .model .mt { color: var(--dim); font-size: 11.5px; margin-top: 2px; }
+  .iconbtn {
+    display: inline-flex; align-items: center; gap: 5px; padding: 5px 9px; font-size: 11px;
+    background: var(--panel2); border: 1px solid var(--line); color: var(--fg);
+    border-radius: 6px; cursor: pointer;
+  }
+  .iconbtn:hover { border-color: var(--hpe-green); color: var(--hpe-green); }
+  .linkbtn {
+    background: none; border: 0; color: var(--hpe-green); font-size: 11px;
+    cursor: pointer; padding: 0; font-family: inherit;
+  }
+  .linkbtn:hover { text-decoration: underline; }
+  .detail { font-size: 11px; color: var(--muted); margin-top: 4px; min-height: 15px; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px; padding: 5px 9px;
+    border-radius: 14px; cursor: pointer; font-size: 11px;
+    font-family: ui-monospace, Consolas, monospace;
+    border: 1px solid var(--line); background: var(--panel2); color: var(--dim);
+  }
+  .chip:hover { border-color: var(--hpe-green); }
+  .chip.sel { border-color: var(--hpe-green); background: var(--hpe-green-dim); color: var(--hpe-green); }
+  .chip .sz { color: var(--muted); font-family: inherit; }
+  .loader { animation: s .8s linear infinite; }
   .spacechip {
     display: inline-block; border: 1px solid var(--line); background: var(--panel2);
     border-radius: 5px; padding: 2px 8px; margin: 0 5px 5px 0; cursor: pointer; font-size: 12px;
@@ -448,20 +494,45 @@
         <code>/v1</code> paths are appended automatically.
       </p>
 
-      <div id="modelStatus" style="margin-top:14px"></div>
-
-      <label>Chat / reasoning model</label>
-      <div id="chatModels" class="modelgrid"></div>
-      <div class="row" style="margin-top:8px">
-        <input id="sModel" placeholder="or type a model name" style="flex:1;min-width:200px">
+      <div class="pickhead" style="margin-top:18px">
+        <span class="picktitle">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" style="color:var(--hpe-green)"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01M6 18h.01"/></svg>
+          Installed models
+          <span class="badge" id="modelSource"></span>
+        </span>
+        <button type="button" class="iconbtn" onclick="loadModels(true)" title="Rescan for installed models">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               id="rescanIcon"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+          Rescan
+        </button>
       </div>
 
-      <label style="margin-top:16px">Embedding model <span style="opacity:.7">— used for semantic dedupe</span></label>
-      <div id="embedModels" class="modelgrid"></div>
-      <div class="row" style="margin-top:8px">
-        <input id="sEmbed" placeholder="or type a model name" style="flex:1;min-width:200px">
-        <label style="margin:0;display:flex;align-items:center;gap:6px;color:var(--fg)">
-          <input type="checkbox" id="sEmbedOn" style="width:auto"> enabled
+      <div id="modelStatus"></div>
+
+      <div style="margin-top:12px">
+        <label style="display:flex;justify-content:space-between;align-items:center;color:var(--fg);font-weight:600;font-size:13px">
+          <span>Chat / reasoning model</span>
+          <button type="button" class="linkbtn" id="manualToggle" onclick="toggleManual()">+ Enter manually</button>
+        </label>
+        <select id="sModelSel" onchange="pickModel('#sModel', this.value)"></select>
+        <input id="sModel" placeholder="qwen2.5-coder:7b" style="display:none">
+        <div class="detail" id="sModelDetail"></div>
+        <div class="chips" id="chatModels"></div>
+      </div>
+
+      <div style="border-top:1px solid var(--line);margin-top:16px;padding-top:14px">
+        <label style="display:flex;align-items:center;gap:6px;color:var(--fg);font-weight:600;font-size:13px">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               style="color:var(--hpe-green)"><path d="M12 3l1.9 5.8L20 10l-5.2 3.1L16 19l-4-3.2L8 19l1.2-5.9L4 10l6.1-1.2z"/></svg>
+          Embedding model <span style="color:var(--muted);font-weight:400">(vector RAG)</span>
+        </label>
+        <select id="sEmbedSel" onchange="pickModel('#sEmbed', this.value)"></select>
+        <input id="sEmbed" placeholder="nomic-embed-text" style="display:none">
+        <div class="detail" id="sEmbedDetail"></div>
+        <label style="display:flex;align-items:center;gap:6px;color:var(--fg);margin-top:10px">
+          <input type="checkbox" id="sEmbedOn" style="width:auto">
+          Enabled — used for semantic near-duplicate detection
         </label>
       </div>
 
@@ -475,10 +546,7 @@
 
     <div class="card">
       <h2>Generation</h2>
-      <label>Record kinds</label>
-      <div class="row" id="sKinds"></div>
-      <div class="grid" style="margin-top:14px">
-        <div>
+      <div class="grid">
           <label>Pairs per chunk</label><input id="sPairs" type="number" min="1" max="12">
           <p class="hint" style="margin:4px 0 0">More rows per chunk, proportionally slower.</p>
         </div>
@@ -803,8 +871,7 @@ async function loadExports() {
 }
 
 /* ---------- settings ---------- */
-const KINDS = ['qa', 'instruction', 'troubleshooting', 'glossary'];
-let settings = null, models = null;
+let settings = null, models = null, manualModel = false;
 
 async function loadSettings() {
   try { settings = await api('/api/settings'); } catch (e) { return flash(e.message, false); }
@@ -823,42 +890,71 @@ async function loadSettings() {
   $('#sMinScore').value = q.min_score;
   $('#sQualityOn').checked = q.enabled;
   $('#cfgPath').textContent = settings.config_path;
-
-  $('#sKinds').innerHTML = KINDS.map(k => `
-    <label style="margin:0;display:flex;align-items:center;gap:6px;color:var(--fg)">
-      <input type="checkbox" style="width:auto" value="${k}" ${g.kinds.includes(k) ? 'checked' : ''}> ${k}
-    </label>`).join('');
-
   loadModels();
 }
 
+function toggleManual() {
+  manualModel = !manualModel;
+  $('#manualToggle').textContent = manualModel ? 'Choose from list' : '+ Enter manually';
+  $('#sModelSel').style.display = manualModel ? 'none' : '';
+  $('#sModel').style.display = manualModel ? '' : 'none';
+  if (manualModel) $('#sModel').focus();
+}
+
 async function loadModels(rescan) {
-  const box = $('#modelStatus');
-  if (rescan) box.innerHTML = '<span class="spin"></span> scanning…';
+  const icon = $('#rescanIcon');
+  if (rescan && icon) icon.classList.add('loader');
   try {
     models = await api('/api/models');
   } catch (e) {
-    box.innerHTML = `<div class="warnbox">${esc(e.message)}</div>`;
+    $('#modelStatus').innerHTML = `<div class="warnbox">${esc(e.message)}</div>`;
     return;
+  } finally {
+    if (icon) icon.classList.remove('loader');
   }
-  box.innerHTML = models.reachable
-    ? `<div class="hint" style="color:var(--ok)">● ${models.models.length} models installed at ${esc(models.base_url)}</div>`
-    : `<div class="warnbox">Not reachable at ${esc(models.base_url)} — start it with <code>ollama serve</code>.
-       Builds still work, but they fall back to extractive generation.</div>`;
 
-  const card = (m, target) => `
-    <div class="model ${$(target).value === m.name ? 'sel' : ''}" onclick="pickModel('${target}','${esc(m.name)}')">
-      <div class="nm">${esc(m.name)}</div>
-      <div class="mt">${[m.params, m.size, m.quantization].filter(Boolean).map(esc).join(' · ') || 'installed'}</div>
-    </div>`;
+  $('#modelSource').textContent = models.provider === 'ollama' ? 'ollama' : 'openai-compatible';
+  $('#modelStatus').innerHTML = models.reachable ? '' : `
+    <div class="warnbox">No local model server reachable at <code>${esc(models.base_url)}</code>.
+    Start Ollama (<code>ollama serve</code>) or LM Studio, then click <strong>Rescan</strong>.
+    Builds still run, but they fall back to extractive generation.</div>`;
 
-  $('#chatModels').innerHTML = models.chat.length
-    ? models.chat.map(m => card(m, '#sModel')).join('')
-    : '<div class="hint">No chat models found.</div>';
-  $('#embedModels').innerHTML = models.embedding.length
-    ? models.embedding.map(m => card(m, '#sEmbed')).join('')
-    : `<div class="hint">No embedding model installed — <code>ollama pull nomic-embed-text</code>.
-       Without one, semantic dedupe is skipped (exact + simhash still run).</div>`;
+  // The saved model may not be installed (custom, or not pulled yet) — keep it
+  // in the list so the select reflects what is actually configured.
+  const withCurrent = (list, current) =>
+    current && !list.some(m => m.name === current)
+      ? [{ name: current, params: '', size: '', quantization: '', family: '' }, ...list]
+      : list;
+
+  const label = m => m.name + (m.params ? ` — ${m.params}` : '') + (m.size ? `, ${m.size}` : '');
+  const fill = (sel, list, current) => {
+    const el = $(sel);
+    el.innerHTML = list.length
+      ? list.map(m => `<option value="${esc(m.name)}"${m.name === current ? ' selected' : ''}>${esc(label(m))}</option>`).join('')
+      : `<option value="${esc(current)}">${esc(current || 'No models found')}</option>`;
+  };
+
+  const chat = withCurrent(models.chat, $('#sModel').value);
+  const embed = withCurrent(models.embedding, $('#sEmbed').value);
+  fill('#sModelSel', chat, $('#sModel').value);
+  fill('#sEmbedSel', embed, $('#sEmbed').value);
+
+  const detail = (m) => m && (m.family || m.params || m.size)
+    ? [m.family || 'model', m.params || '—', m.size].filter(Boolean).map(esc).join(' · ') : '';
+  $('#sModelDetail').textContent = detail(models.chat.find(m => m.name === $('#sModel').value));
+  $('#sEmbedDetail').textContent = detail(models.embedding.find(m => m.name === $('#sEmbed').value));
+
+  $('#chatModels').innerHTML = models.chat.map(m => {
+    const on = m.name === $('#sModel').value;
+    return `<button type="button" class="chip ${on ? 'sel' : ''}" onclick="pickModel('#sModel','${esc(m.name)}')">
+      ${on ? '✓' : '▪'} ${esc(m.name)} <span class="sz">${esc(m.size)}</span></button>`;
+  }).join('');
+
+  if (!models.embedding.length && models.reachable) {
+    $('#sEmbedDetail').innerHTML =
+      `<span style="color:var(--warn)">No embedding model installed — semantic dedupe is skipped
+       (exact and simhash still run). Install one: <code>ollama pull nomic-embed-text</code></span>`;
+  }
 }
 
 function pickModel(target, name) {
@@ -867,8 +963,6 @@ function pickModel(target, name) {
 }
 
 async function saveSettings() {
-  const kinds = [...$('#sKinds').querySelectorAll('input:checked')].map(i => i.value);
-  if (!kinds.length) return flash('Pick at least one record kind', false);
   const num = (sel, int) => { const v = $(sel).value; return v === '' ? null : (int ? parseInt(v) : parseFloat(v)); };
   try {
     const d = await api('/api/settings', {
@@ -880,7 +974,7 @@ async function saveSettings() {
           embed_enabled: $('#sEmbedOn').checked,
           temperature: num('#sTemp'), num_ctx: num('#sCtx', true),
         },
-        generation: { kinds, pairs_per_chunk: num('#sPairs', true), max_workers: num('#sWorkers', true) },
+        generation: { pairs_per_chunk: num('#sPairs', true), max_workers: num('#sWorkers', true) },
         chunking: { max_chars: num('#sChunk', true), overlap: num('#sOverlap', true) },
         quality: { enabled: $('#sQualityOn').checked, min_score: num('#sMinScore') },
       }),

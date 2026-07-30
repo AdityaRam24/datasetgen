@@ -116,13 +116,15 @@ Ten tabs covering everything you'd otherwise do on the command line:
 
 ### Settings
 
-Scans your local endpoint and lists the installed models with parameter counts and sizes,
-so you pick from what you actually have rather than typing a name and hoping. Embedding
-models are detected and shown separately — picking a chat model as your embedder (or vice
-versa) is an easy mistake that quietly degrades dedupe.
+Styled to match the Kalam configuration page — HPE green `#01A982`, the same design
+tokens, and the same model-picker pattern: an **Installed models** header with **Rescan**,
+a dropdown listing what is actually installed with parameter counts and sizes, quick-pick
+chips underneath, and **+ Enter manually** for a model you have not pulled yet. Embedding
+models are detected and listed separately under *(vector RAG)* — picking a chat model as
+your embedder is an easy mistake that quietly degrades dedupe.
 
-Also covers generation kinds, pairs per chunk, workers, chunk size, and the quality
-threshold. Everything is written back to `config.toml` **preserving your comments** — the
+Also covers pairs per chunk, workers, chunk size, and the quality threshold. Record kinds
+are set in `config.toml` (`generation.kinds`). Everything is written back to `config.toml` **preserving your comments** — the
 file is parsed before saving and the write is refused if the result would not be valid
 TOML.
 
