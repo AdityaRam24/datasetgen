@@ -91,6 +91,29 @@ SOURCE:
 {text}
 \"\"\""""
 
+_GLOSSARY_PROMPT = """Extract the technical TERMS that the SOURCE actually defines
+or explains, and write a glossary entry for each.
+
+Rules:
+- Only terms this SOURCE explains. Do not define a term from your own knowledge.
+- Include product names, components, acronyms, resource types, config keys and
+  domain jargon. Skip ordinary English words.
+- "definition" is 1-3 complete sentences, understandable on its own, using only
+  what the SOURCE says. Start it with the term's category ("MLIS is a service
+  that...", "CrashLoopBackOff is a pod state that..."), not with "It is".
+- "aliases" holds other spellings the SOURCE uses: expansions of an acronym,
+  the acronym for a spelled-out name, plurals. Empty list if none.
+- Return {{"terms": []}} if the SOURCE defines nothing.
+
+Return JSON exactly like:
+{{"terms": [{{"term": "...", "definition": "...", "aliases": ["..."]}}]}}
+
+TITLE: {title}
+SOURCE:
+\"\"\"
+{text}
+\"\"\""""
+
 
 # ---------------------------------------------------------------------------
 # LLM-backed generators
@@ -125,6 +148,63 @@ def _gen_troubleshooting(chunk: Chunk, llm: LocalLLM, n: int) -> list[Record]:
     return _pairs_to_records(
         data, chunk, "troubleshooting", ("symptom", "answer"), llm.cfg.model, "cases"
     )
+
+
+def _gen_glossary(chunk: Chunk, llm: LocalLLM, n: int) -> list[Record] | None:
+    data = llm.complete_json(
+        _GLOSSARY_PROMPT.format(title=chunk.title, text=truncate(chunk.text, 6000)),
+        system=SYSTEM,
+    )
+    if data is None:
+        return None
+
+    items = data if isinstance(data, list) else []
+    if isinstance(data, dict):
+        for key in ("terms", "glossary", "entries", "items"):
+            if isinstance(data.get(key), list):
+                items = data[key]
+                break
+
+    out: list[Record] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        term = clean_text(str(item.get("term") or item.get("name") or "")).strip(" .:")
+        definition = clean_text(str(item.get("definition") or item.get("meaning") or ""))
+        if not is_useful_term(term) or len(definition) < 25:
+            continue
+        aliases = [
+            clean_text(str(a)).strip(" .:")
+            for a in (item.get("aliases") or [])
+            if str(a).strip()
+        ]
+        out.append(
+            Record.make(
+                "glossary",
+                f"What is {term}?",
+                definition,
+                chunk,
+                generator=f"llm:{llm.cfg.model}",
+                meta={"term": term, "aliases": aliases[:6]},
+            )
+        )
+    return out
+
+
+# Terms that are not worth a glossary entry: too short, too long, pure prose,
+# or a stopword the model latched onto.
+_BAD_TERM = re.compile(r"^(the|a|an|this|that|it|they|you|we|note|example|step)\b", re.I)
+
+
+def is_useful_term(term: str) -> bool:
+    if not term or len(term) < 2 or len(term) > 60:
+        return False
+    if _BAD_TERM.match(term):
+        return False
+    words = term.split()
+    if len(words) > 6:
+        return False           # a sentence, not a term
+    return any(c.isalpha() for c in term)
 
 
 def _pairs_to_records(
@@ -222,6 +302,9 @@ def _extractive(chunk: Chunk, kinds: list[str]) -> list[Record]:
             )
         )
 
+    if "glossary" in kinds:
+        out.extend(_extractive_glossary(chunk, body))
+
     if "troubleshooting" in kinds:
         error_lines = [l.strip() for l in body.split("\n") if _ERROR_LINE.search(l) and len(l) > 25]
         if error_lines:
@@ -243,16 +326,65 @@ def _extractive(chunk: Chunk, kinds: list[str]) -> list[Record]:
 # Orchestration
 # ---------------------------------------------------------------------------
 
+# Definition patterns, in the order we trust them:
+#   "MLIS (Machine Learning Inference Service)"  -> acronym expansion
+#   "MLIS is a service that ..."                 -> copula definition
+#   "MLIS — the component that ..."              -> dash definition
+_ACRONYM = re.compile(r"\b([A-Z][A-Za-z0-9]{1,9})\s*\(([^)]{6,80})\)")
+_COPULA = re.compile(
+    r"^(?:The\s+)?([A-Z][\w.\-]*(?:\s+[\w.\-]+){0,4})\s+"
+    r"(?:is|are)\s+(?:an?|the)\s+(.{20,400}?[.!])",
+    re.M,
+)
+_DASH = re.compile(r"^([A-Z][\w.\-]*(?:\s+[\w.\-]+){0,3})\s+[—–-]\s+(.{25,300}?[.!])", re.M)
+
+
+def _extractive_glossary(chunk: Chunk, body: str) -> list[Record]:
+    """Definitions pulled out by pattern, with no model involved."""
+    found: dict[str, tuple[str, list[str]]] = {}
+
+    for m in _ACRONYM.finditer(body):
+        acronym, expansion = m.group(1).strip(), m.group(2).strip()
+        # Only when the parenthetical really is an expansion of the acronym.
+        initials = "".join(w[0] for w in expansion.split() if w[:1].isalpha()).upper()
+        if acronym.upper() in (initials, initials[: len(acronym)]) and is_useful_term(acronym):
+            found.setdefault(acronym.lower(), (f"{acronym} stands for {expansion}.", [expansion]))
+
+    for pattern in (_COPULA, _DASH):
+        for m in pattern.finditer(body):
+            term, definition = m.group(1).strip(), m.group(2).strip()
+            if is_useful_term(term) and term.lower() not in found:
+                joiner = " is a " if pattern is _COPULA else " — "
+                found[term.lower()] = (f"{term}{joiner}{definition}", [])
+
+    out: list[Record] = []
+    for _, (definition, aliases) in list(found.items())[:12]:
+        term = definition.split(" stands for ")[0].split(" is a ")[0].split(" — ")[0].strip()
+        out.append(
+            Record.make(
+                "glossary",
+                f"What is {term}?",
+                definition,
+                chunk,
+                generator="extractive:definition-pattern",
+                meta={"term": term, "aliases": aliases},
+            )
+        )
+    return out
+
+
 GENERATORS: dict[str, Callable[[Chunk, LocalLLM, int], list[Record] | None]] = {
     "qa": _gen_qa,
     "instruction": _gen_instruction,
     "troubleshooting": _gen_troubleshooting,
+    "glossary": _gen_glossary,
 }
 
 
 def _kinds_for(chunk: Chunk, configured: list[str]) -> list[str]:
     """Bias the kind mix by material: runbooks and error pages deserve
-    troubleshooting examples; reference pages mostly want Q&A."""
+    troubleshooting examples; reference pages mostly want Q&A. Glossary always
+    applies — terminology turns up everywhere."""
     kinds = [k for k in configured if k in GENERATORS]
     is_procedural = chunk.kind == "runbook" or "runbook" in chunk.tags
     has_errors = bool(_ERROR_LINE.search(chunk.text))

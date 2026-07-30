@@ -16,11 +16,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from datagen.chunking import chunk_document                      # noqa: E402
-from datagen.config import ChunkingConfig, LLMConfig, QualityConfig  # noqa: E402
+from datagen.config import ChunkingConfig, LLMConfig, QualityConfig, load_config  # noqa: E402
 from datagen.connectors.parsers import parse_html, _postprocess_pdf  # noqa: E402
 from datagen.connectors.runbooks import normalize, parse_runbook  # noqa: E402
 from datagen.dedupe import Deduper, hamming, simhash             # noqa: E402
-from datagen.exporters import split_by_document, to_alpaca, to_chatml  # noqa: E402
+from datagen.exporters import (                                   # noqa: E402
+    build_glossary, glossary_markdown, split_by_document, to_alpaca, to_chatml,
+)
+from datagen.generators import _extractive_glossary, is_useful_term  # noqa: E402
 from datagen.models import Chunk, Document, Record               # noqa: E402
 from datagen.quality import grounding_score, heuristic_check     # noqa: E402
 from datagen.state import StateStore, _to_signed64, _to_unsigned64  # noqa: E402
@@ -278,6 +281,25 @@ class TestExporters(unittest.TestCase):
         self.assertTrue(train and evalset)
         self.assertFalse({r.source_url for r in train} & {r.source_url for r in evalset})
         self.assertEqual(len(train) + len(evalset), 60)
+        self.assertGreaterEqual(len(train), len(evalset))
+
+    def test_split_stays_train_heavy_with_few_documents(self):
+        # Regression: two lopsided documents used to invert the split entirely,
+        # putting 15 of 18 records into eval.
+        records = self._records(3, 1)
+        for i in range(15):
+            doc = make_doc(f"other {i}", title="doc-big")
+            records.append(Record.make("qa", f"big q {i}?", f"big a {i}", Chunk.make(doc, "t", 0)))
+        train, evalset = split_by_document(records, 0.9, seed=42)
+        self.assertEqual(len(train) + len(evalset), 18)
+        self.assertGreater(len(train), len(evalset))
+        self.assertTrue(evalset)
+        self.assertFalse({r.source_url for r in train} & {r.source_url for r in evalset})
+
+    def test_split_with_a_single_document_keeps_everything_in_train(self):
+        train, evalset = split_by_document(self._records(10, 1), 0.9, seed=1)
+        self.assertEqual(len(train), 10)
+        self.assertEqual(evalset, [])
 
     def test_alpaca_shape_and_citation(self):
         rec = self._records(1, 1)[0]
@@ -290,6 +312,79 @@ class TestExporters(unittest.TestCase):
         row = to_chatml(self._records(1, 1)[0], system="sys")
         roles = [m["role"] for m in row["messages"]]
         self.assertEqual(roles, ["system", "user", "assistant"])
+
+
+class TestGlossary(unittest.TestCase):
+    def _entry(self, term, definition, score=1.0, url="file:///a", aliases=None):
+        chunk = Chunk.make(make_doc(definition, title="Src"), definition, 0)
+        chunk.url = url
+        rec = Record.make("glossary", f"What is {term}?", definition, chunk,
+                          meta={"term": term, "aliases": aliases or []})
+        rec.score = score
+        return rec
+
+    def test_useful_term_filter(self):
+        for good in ("MLIS", "CrashLoopBackOff", "control plane", "nvidia.com/gpu"):
+            self.assertTrue(is_useful_term(good), good)
+        for bad in ("", "a", "the endpoint", "This is a very long sentence masquerading as a term"):
+            self.assertFalse(is_useful_term(bad), bad)
+
+    def test_terms_merge_across_chunks_keeping_the_best_definition(self):
+        entries = build_glossary([
+            self._entry("MLIS", "MLIS is a short one.", score=0.6, url="file:///a"),
+            self._entry("mlis", "MLIS is a service that serves inference endpoints on the "
+                                "GPU worker pool.", score=0.95, url="file:///b"),
+            self._entry("MLIS", "MLIS is another mention.", score=0.5, url="file:///c"),
+        ])
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertIn("serves inference endpoints", entry["definition"])
+        self.assertEqual(entry["mentions"], 3)
+        self.assertEqual(len(entry["sources"]), 3)   # every source is cited
+
+    def test_aliases_are_collected_and_self_alias_dropped(self):
+        entries = build_glossary([
+            self._entry("MLDM", "MLDM stands for Machine Learning Data Management.",
+                        aliases=["Machine Learning Data Management", "MLDM"]),
+        ])
+        self.assertEqual(entries[0]["aliases"], ["Machine Learning Data Management"])
+
+    def test_entries_are_sorted_alphabetically(self):
+        entries = build_glossary([
+            self._entry("Zookeeper", "Zookeeper is a coordination service used here."),
+            self._entry("Argo", "Argo is a workflow engine used by the platform."),
+        ])
+        self.assertEqual([e["term"] for e in entries], ["Argo", "Zookeeper"])
+
+    def test_markdown_has_headings_sources_and_az_groups(self):
+        cfg = load_config()
+        md = glossary_markdown(build_glossary([
+            self._entry("Argo", "Argo is a workflow engine used by the platform."),
+            self._entry("Zookeeper", "Zookeeper is a coordination service used here."),
+        ]), cfg)
+        self.assertIn("### Argo", md)
+        self.assertIn("## A", md)
+        self.assertIn("## Z", md)
+        self.assertIn("Sources:", md)
+        self.assertLess(md.index("### Argo"), md.index("### Zookeeper"))
+
+    def test_extractive_glossary_finds_acronyms_and_copulas(self):
+        body = (
+            "MLIS (Machine Learning Inference Service) hosts endpoints.\n"
+            "CrashLoopBackOff is a pod state that means the container keeps restarting "
+            "after repeated failures.\n"
+            "The weather was nice that day.\n"
+        )
+        chunk = Chunk.make(make_doc(body), body, 0)
+        terms = {(r.meta or {}).get("term") for r in _extractive_glossary(chunk, body)}
+        self.assertIn("MLIS", terms)
+        self.assertIn("CrashLoopBackOff", terms)
+
+    def test_extractive_rejects_a_parenthetical_that_is_not_an_expansion(self):
+        body = "The GPU (which we installed last year) is idle right now."
+        chunk = Chunk.make(make_doc(body), body, 0)
+        terms = {(r.meta or {}).get("term") for r in _extractive_glossary(chunk, body)}
+        self.assertNotIn("GPU", terms)
 
 
 class TestLLMConfig(unittest.TestCase):

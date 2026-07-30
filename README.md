@@ -54,7 +54,8 @@ keyword ─┘    │  keywords   search & scrape    │   │    │ local LLM 
                                                    ▼             │
                         documents ─▶ chunks ─▶ dedupe ─▶ generate ─▶ accepted
                                                 (3 layers)  (local)      │
-                                                                         ▼
+                                                        qa │ instruction │
+                                             troubleshooting │ glossary  ▼
                                               exports/  +  server/pcai/learned.json
 ```
 
@@ -199,7 +200,36 @@ nothing.
 | `train.sharegpt.jsonl` | axolotl / LLaMA-Factory |
 | `train.chatml.jsonl` | OpenAI-style `{messages:[...]}` |
 | `rag_chunks.jsonl` | The chunks themselves, for retrieval instead of fine-tuning |
+| `GLOSSARY.md` + `glossary.jsonl` | A readable A–Z glossary of every term your corpus defines |
 | `manifest.json` | Counts by kind and source, mean score, which model generated it |
+
+### The glossary
+
+`glossary` is a generation kind *and* an export format. The generator asks the local
+model which terms each chunk actually **defines** — products, components, acronyms,
+resource types, config keys — and refuses to define anything from its own knowledge.
+
+Unlike the other formats it is not one row per record. The same term gets defined in a
+dozen chunks, so entries are **merged corpus-wide**: the highest-scored definition wins,
+aliases (acronym ↔ expansion) are unioned, and *every* source that discussed the term is
+cited under the entry.
+
+```markdown
+### MLIS
+
+MLIS is a service that hosts inference endpoints on the GPU worker pool.
+
+*Also known as: Machine Learning Inference Service*
+
+<sub>Sources: [PCAI Architecture Notes](…), [MLIS endpoint runbook](…)</sub>
+```
+
+With no model running, an extractive fallback still finds definitions by pattern —
+`MLIS (Machine Learning Inference Service)` acronym expansions (validated against the
+initials, so `The GPU (which we installed last year)` is correctly rejected), plus
+`X is a …` and `X — …` sentences.
+
+Turn it off by dropping `"glossary"` from `generation.kinds` and `export.formats`.
 
 ### Feeding the Kalam PCAI assistant
 

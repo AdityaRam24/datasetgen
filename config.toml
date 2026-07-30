@@ -65,7 +65,10 @@ semantic_threshold = 0.94
 # Generation: what kinds of records to synthesise from each chunk
 # -----------------------------------------------------------------------------
 [generation]
-kinds              = ["qa", "instruction", "troubleshooting"]
+# qa | instruction | troubleshooting | glossary
+# `glossary` extracts defined terms; they are merged corpus-wide into
+# exports/GLOSSARY.md rather than staying one row per chunk.
+kinds              = ["qa", "instruction", "troubleshooting", "glossary"]
 pairs_per_chunk    = 3
 max_workers        = 4
 include_citations  = true       # every record carries source url/title/chunk id
@@ -172,7 +175,7 @@ jitter_pct    = 10
 # Export
 # -----------------------------------------------------------------------------
 [export]
-formats   = ["jsonl", "alpaca", "sharegpt", "chatml", "rag_chunks"]
+formats   = ["jsonl", "alpaca", "sharegpt", "chatml", "rag_chunks", "glossary"]
 out_dir   = "exports"
 split     = { train = 0.9, eval = 0.1 }
 shuffle_seed = 42

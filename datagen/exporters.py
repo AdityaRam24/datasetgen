@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -105,31 +106,170 @@ def to_rag_chunk(chunk: Chunk) -> dict:
 
 
 def split_by_document(records: list[Record], train_ratio: float, seed: int) -> tuple[list[Record], list[Record]]:
-    """Group-aware split: all rows from one source URL land on the same side."""
+    """Group-aware split: all rows from one source URL land on the same side.
+
+    Groups are packed largest-first, which matters when the corpus has only a
+    handful of documents: filling in random order can overshoot on the first
+    group and dump nearly everything into eval. With few documents the split
+    can only ever approximate `train_ratio` — it lands on the closest option
+    rather than the worst one.
+    """
     groups: dict[str, list[Record]] = {}
     for rec in records:
         groups.setdefault(rec.source_url or rec.chunk_id, []).append(rec)
 
     keys = sorted(groups)
-    random.Random(seed).shuffle(keys)
+    random.Random(seed).shuffle(keys)          # reproducible tie-breaking …
+    keys.sort(key=lambda k: len(groups[k]), reverse=True)   # … largest first
 
-    target = int(len(records) * train_ratio)
+    target = len(records) * train_ratio
     train: list[Record] = []
     evalset: list[Record] = []
     for key in keys:
-        (train if len(train) < target else evalset).extend(groups[key])
+        group = groups[key]
+        # Take the group into train while it still fits, and always take the
+        # first one so train is never empty.
+        if not train or len(train) + len(group) <= target:
+            train.extend(group)
+        else:
+            evalset.extend(group)
 
-    # Guarantee a non-empty eval set when there is enough material for one.
+    # Guarantee a non-empty eval set by moving the SMALLEST group across —
+    # that is the least damaging way to carve one out.
     if not evalset and len(keys) > 1:
-        moved = groups[keys[-1]]
-        train = [r for r in train if r not in moved]
-        evalset = moved
+        smallest = min(keys, key=lambda k: len(groups[k]))
+        moved = {id(r) for r in groups[smallest]}
+        evalset = groups[smallest]
+        train = [r for r in train if id(r) not in moved]
 
     log.info(
-        "split: %d train / %d eval across %d source documents",
-        len(train), len(evalset), len(keys),
+        "split: %d train / %d eval across %d source documents (target %.0f train)",
+        len(train), len(evalset), len(keys), target,
     )
+    if len(keys) < 5:
+        log.info(
+            "  only %d source documents — a document-level split is coarse; "
+            "add more sources for a meaningful eval set", len(keys),
+        )
     return train, evalset
+
+
+# ---------------------------------------------------------------------------
+# Glossary
+#
+# Unlike every other format, a glossary is not one-row-per-record: the same term
+# gets defined in a dozen chunks and the reader wants ONE entry with the best
+# definition and every place it is discussed. So entries are merged by term.
+# ---------------------------------------------------------------------------
+
+_TERM_KEY = re.compile(r"[^a-z0-9]+")
+
+
+def _term_key(term: str) -> str:
+    """Merge key: case, punctuation and plural-insensitive."""
+    key = _TERM_KEY.sub(" ", term.lower()).strip()
+    return key[:-1] if len(key) > 3 and key.endswith("s") and not key.endswith("ss") else key
+
+
+def build_glossary(records: list[Record]) -> list[dict]:
+    """Merge glossary records into one entry per term.
+
+    The winning definition is the highest-scored one; ties break toward the
+    longer (more informative) text. Every source that mentioned the term is
+    kept, so an entry cites all of them.
+    """
+    merged: dict[str, dict] = {}
+
+    for rec in records:
+        if rec.kind != "glossary" or rec.quarantined:
+            continue
+        term = (rec.meta or {}).get("term") or rec.instruction.removeprefix("What is ").rstrip("?")
+        term = term.strip()
+        if not term:
+            continue
+
+        key = _term_key(term)
+        entry = merged.setdefault(
+            key,
+            {"term": term, "definition": "", "score": -1.0, "aliases": set(),
+             "sources": {}, "mentions": 0, "generator": ""},
+        )
+        entry["mentions"] += 1
+        entry["aliases"].update((rec.meta or {}).get("aliases") or [])
+
+        score = rec.score if rec.score is not None else 0.0
+        better = score > entry["score"] or (
+            score == entry["score"] and len(rec.output) > len(entry["definition"])
+        )
+        if better:
+            entry.update(
+                {"definition": rec.output, "score": score, "term": term,
+                 "generator": rec.generator}
+            )
+        if rec.source_url:
+            entry["sources"][rec.source_url] = rec.source_title or rec.source_url
+
+    out = []
+    for entry in merged.values():
+        aliases = sorted(
+            a for a in entry["aliases"]
+            if a and _term_key(a) != _term_key(entry["term"])
+        )
+        out.append({
+            "term": entry["term"],
+            "definition": entry["definition"],
+            "aliases": aliases,
+            "sources": [{"title": t, "url": u} for u, t in entry["sources"].items()],
+            "mentions": entry["mentions"],
+            "score": round(entry["score"], 3) if entry["score"] >= 0 else None,
+            "generator": entry["generator"],
+        })
+
+    out.sort(key=lambda e: e["term"].lower())
+    log.info("glossary: %d unique terms from %d records",
+             len(out), sum(1 for r in records if r.kind == "glossary"))
+    return out
+
+
+def glossary_markdown(entries: list[dict], cfg: Config) -> str:
+    """Render the glossary as a readable document, grouped A-Z."""
+    groups: dict[str, list[dict]] = {}
+    for entry in entries:
+        first = entry["term"][0].upper()
+        groups.setdefault(first if first.isalpha() else "#", []).append(entry)
+
+    letters = sorted(groups, key=lambda c: (c == "#", c))
+
+    lines = [
+        f"# Glossary — {cfg.description or cfg.name}",
+        "",
+        f"{len(entries)} terms, generated {now_iso()} by the local model "
+        f"`{cfg.llm.model}`. Every definition is drawn from the sources cited "
+        "beneath it — nothing here is the model's own knowledge.",
+        "",
+        "  ".join(f"[{c}](#{c.lower() if c.isalpha() else 'other'})" for c in letters),
+        "",
+    ]
+
+    for letter in letters:
+        lines += [f"## {letter}" if letter.isalpha() else "## Other", ""]
+        for entry in groups[letter]:
+            lines.append(f"### {entry['term']}")
+            lines.append("")
+            lines.append(entry["definition"])
+            lines.append("")
+            if entry["aliases"]:
+                lines.append(f"*Also known as: {', '.join(entry['aliases'])}*")
+                lines.append("")
+            if entry["sources"]:
+                cites = ", ".join(
+                    f"[{s['title'][:60]}]({s['url']})" for s in entry["sources"][:4]
+                )
+                extra = f" +{len(entry['sources']) - 4} more" if len(entry["sources"]) > 4 else ""
+                lines.append(f"<sub>Sources: {cites}{extra}</sub>")
+                lines.append("")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +383,18 @@ def export_all(
     if "rag_chunks" in formats and chunks:
         emit("rag_chunks.jsonl", (to_rag_chunk(c) for c in chunks))
 
+    glossary: list[dict] = []
+    if "glossary" in formats:
+        glossary = build_glossary(records)
+        if glossary:
+            emit("glossary.jsonl", iter(glossary))
+            doc = out_dir / "GLOSSARY.md"
+            doc.write_text(glossary_markdown(glossary, cfg), encoding="utf-8")
+            log.info("wrote %-46s %d terms", doc.name, len(glossary))
+            written.append(doc.name)
+        else:
+            log.info("glossary: no terms found — is 'glossary' in generation.kinds?")
+
     kalam_docs = 0
     if cfg.export.kalam_kb_path:
         kalam_docs = export_kalam_kb(
@@ -258,6 +410,7 @@ def export_all(
         "train": len(train),
         "eval": len(evalset),
         "chunks": len(chunks),
+        "glossary_terms": len(glossary),
         "kalam_kb_docs": kalam_docs,
         "kinds": _tally(r.kind for r in records),
         "sources": _tally(t for r in records for t in r.tags if t.startswith("source:")),

@@ -94,6 +94,9 @@ class Record:
     quarantined: bool = False
     generator: str = ""            # llm:<model> or extractive:<strategy>
     created_at: str = field(default_factory=now_iso)
+    meta: dict[str, Any] = field(default_factory=dict)  # kind-specific extras
+                                                        # (glossary puts `term`
+                                                        # and `aliases` here)
 
     @staticmethod
     def make(kind: str, instruction: str, output: str, chunk: Chunk, **kw: Any) -> "Record":
