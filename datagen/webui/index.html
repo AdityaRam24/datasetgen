@@ -611,6 +611,14 @@ function flash(text, ok = true) {
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
+  // The page is re-read from disk on every request but the Python is not, so a
+  // server started before a feature existed serves the NEW html against OLD
+  // code. That shows up as a bare 404; say what it actually means.
+  if (r.status === 404 && path.startsWith('/api/')) {
+    throw new Error(`The running server does not have ${path} — it was started before this `
+      + 'feature was added. Stop it (Ctrl-C in its terminal) and run '
+      + '`python -m datagen serve` again.');
+  }
   const d = await r.json().catch(() => ({ ok: false, error: 'bad response from server' }));
   if (!r.ok || d.ok === false) throw new Error(d.error || ('HTTP ' + r.status));
   return d;
@@ -908,6 +916,11 @@ async function loadModels(rescan) {
     models = await api('/api/models');
   } catch (e) {
     $('#modelStatus').innerHTML = `<div class="warnbox">${esc(e.message)}</div>`;
+    // Keep the select usable even when discovery failed, so the configured
+    // model is still visible and editable rather than the control going dead.
+    const cur = $('#sModel').value, curE = $('#sEmbed').value;
+    $('#sModelSel').innerHTML = `<option value="${esc(cur)}">${esc(cur || 'unknown')}</option>`;
+    $('#sEmbedSel').innerHTML = `<option value="${esc(curE)}">${esc(curE || 'unknown')}</option>`;
     return;
   } finally {
     if (icon) icon.classList.remove('loader');
