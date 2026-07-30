@@ -112,12 +112,19 @@ tags    = ["runbook", "ops"]
 # Confluence. Credentials come from the environment, never from this file:
 #   CONFLUENCE_BASE_URL, CONFLUENCE_USER, CONFLUENCE_TOKEN
 [[sources.confluence]]
-name       = "engineering-space"
-enabled    = false               # flip to true once creds are in .env
+name       = "wiki"
+enabled    = true
+# YOUR SPACE KEYS — the short code in the page URL, e.g. /wiki/spaces/OPS/pages/...
+# Replace these placeholders; if a key does not exist the search returns nothing.
 spaces     = ["PCAI", "OPS"]
-cql        = ""                  # optional raw CQL; overrides `spaces`
-max_pages  = 500
+cql        = ""                  # optional raw CQL; overrides `spaces` entirely
+# Start small. Raise this once you have seen what a run produces — 500 pages is
+# hours of generation on a local 7B model.
+max_pages  = 25
 include_attachments = true       # pulls PDF/DOCX attachments through the file parsers
+# Only pages edited since this point. "-30d", "-6m" or "2026-01-01".
+# Leave empty for everything.
+updated_since = ""
 tags       = ["confluence"]
 
 # Direct web crawl targets.

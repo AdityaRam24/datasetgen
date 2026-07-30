@@ -1,6 +1,6 @@
 {
   "dataset": "pcai-dataset",
-  "generated_at": "2026-07-30T20:19:56Z",
+  "generated_at": "2026-07-30T20:34:31Z",
   "generated_by": "local model qwen2.5-coder:7b via ollama (http://localhost:11434)",
   "records": 26,
   "train": 23,
