@@ -38,7 +38,7 @@ from datagen.models import Chunk, Document, Record               # noqa: E402
 from datagen.quality import grounding_score, heuristic_check     # noqa: E402
 from datagen.state import StateStore, _to_signed64, _to_unsigned64  # noqa: E402
 from datagen.web import (                                         # noqa: E402
-    safe_upload_path, update_keywords, update_project,
+    mask_secret, safe_upload_path, update_env, update_keywords, update_project, update_toml,
 )
 from datagen.util import (                                        # noqa: E402
     clean_text, estimate_tokens, extract_json, tokenize,
@@ -688,6 +688,129 @@ class TestWebUI(unittest.TestCase):
         parsed = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
         self.assertEqual(parsed["project"]["name"], "new")
         self.assertEqual(parsed["project"]["description"], "new desc")
+
+    SAMPLE = '''# leading comment
+[llm]
+provider     = "ollama"          # trailing comment
+base_url     = "http://localhost:11434"
+model        = "qwen2.5-coder:7b"
+temperature  = 0.2
+
+[llm.embeddings]
+enabled = true
+model   = "nomic-embed-text"
+
+[generation]
+kinds           = ["qa", "instruction"]
+pairs_per_chunk = 3
+
+[agent]
+objective = """
+multi-line
+objective text
+"""
+enabled = true
+
+[[sources.confluence]]
+enabled   = false
+spaces    = ["A", "B"]
+max_pages = 25
+'''
+
+    def _sample(self) -> Path:
+        p = self.root / "config.toml"
+        p.write_text(self.SAMPLE, encoding="utf-8")
+        return p
+
+    def test_toml_update_replaces_values_and_keeps_comments(self):
+        import tomllib
+        p = self._sample()
+        changed = update_toml(p, "llm", {"model": "gemma4:latest", "temperature": 0.5})
+        self.assertEqual(set(changed), {"model", "temperature"})
+
+        text = p.read_text(encoding="utf-8")
+        self.assertIn("# leading comment", text)
+        self.assertIn("# trailing comment", text)     # inline comment survives
+        parsed = tomllib.loads(text)
+        self.assertEqual(parsed["llm"]["model"], "gemma4:latest")
+        self.assertEqual(parsed["llm"]["temperature"], 0.5)
+        self.assertEqual(parsed["llm"]["base_url"], "http://localhost:11434")
+
+    def test_toml_update_targets_the_right_table(self):
+        import tomllib
+        p = self._sample()
+        # Both [llm] and [llm.embeddings] have a `model` key.
+        update_toml(p, "llm.embeddings", {"model": "mxbai-embed-large"})
+        parsed = tomllib.loads(p.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["llm"]["embeddings"]["model"], "mxbai-embed-large")
+        self.assertEqual(parsed["llm"]["model"], "qwen2.5-coder:7b")   # untouched
+
+    def test_toml_update_handles_lists_and_bools(self):
+        import tomllib
+        p = self._sample()
+        update_toml(p, "generation", {"kinds": ["qa", "glossary", "troubleshooting"]})
+        update_toml(p, "sources.confluence", {"enabled": True, "spaces": ["OPS"]})
+        parsed = tomllib.loads(p.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["generation"]["kinds"], ["qa", "glossary", "troubleshooting"])
+        self.assertTrue(parsed["sources"]["confluence"][0]["enabled"])
+        self.assertEqual(parsed["sources"]["confluence"][0]["spaces"], ["OPS"])
+
+    def test_toml_update_does_not_corrupt_multiline_strings(self):
+        import tomllib
+        p = self._sample()
+        update_toml(p, "agent", {"enabled": False})
+        parsed = tomllib.loads(p.read_text(encoding="utf-8"))
+        self.assertIn("multi-line", parsed["agent"]["objective"])
+        self.assertFalse(parsed["agent"]["enabled"])
+
+    def test_toml_update_appends_a_missing_key(self):
+        import tomllib
+        p = self._sample()
+        update_toml(p, "sources.confluence", {"updated_since": "-30d"})
+        parsed = tomllib.loads(p.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["sources"]["confluence"][0]["updated_since"], "-30d")
+
+    def test_toml_update_is_a_noop_when_nothing_differs(self):
+        p = self._sample()
+        before = p.read_text(encoding="utf-8")
+        self.assertEqual(update_toml(p, "llm", {"model": "qwen2.5-coder:7b"}), [])
+        self.assertEqual(p.read_text(encoding="utf-8"), before)
+
+    def test_toml_update_rejects_a_missing_section(self):
+        p = self._sample()
+        with self.assertRaises(ValueError):
+            update_toml(p, "nope", {"a": 1})
+
+    def test_toml_update_escapes_quotes_rather_than_breaking_the_file(self):
+        import tomllib
+        p = self._sample()
+        update_toml(p, "llm", {"model": 'weird"name'})
+        parsed = tomllib.loads(p.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["llm"]["model"], 'weird"name')
+
+    def test_env_update_preserves_comments_and_replaces_in_place(self):
+        p = self.root / ".env"
+        p.write_text("# a comment\nCONFLUENCE_BASE_URL=\nCONFLUENCE_TOKEN=old\n", encoding="utf-8")
+        changed = update_env(p, {"CONFLUENCE_BASE_URL": "https://x.atlassian.net/wiki",
+                                 "CONFLUENCE_TOKEN": "new"})
+        self.assertEqual(set(changed), {"CONFLUENCE_BASE_URL", "CONFLUENCE_TOKEN"})
+        text = p.read_text(encoding="utf-8")
+        self.assertIn("# a comment", text)
+        self.assertIn("CONFLUENCE_BASE_URL=https://x.atlassian.net/wiki", text)
+        self.assertIn("CONFLUENCE_TOKEN=new", text)
+        self.assertNotIn("=old", text)
+
+    def test_env_update_appends_unknown_keys(self):
+        p = self.root / ".env"
+        p.write_text("EXISTING=1\n", encoding="utf-8")
+        update_env(p, {"BRAND_NEW": "2"})
+        self.assertIn("BRAND_NEW=2", p.read_text(encoding="utf-8"))
+
+    def test_secret_masking_never_reveals_the_middle(self):
+        self.assertEqual(mask_secret(""), "")
+        self.assertNotIn("SECRET", mask_secret("ATATT-SUPER-SECRET-VALUE"))
+        self.assertTrue(mask_secret("ATATT-SUPER-SECRET-VALUE").startswith("ATAT"))
+        self.assertEqual(mask_secret("short"), "•" * 5)
 
     def test_ui_file_exists(self):
         self.assertTrue((Path(__file__).resolve().parent.parent

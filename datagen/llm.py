@@ -88,6 +88,42 @@ class LocalLLM:
                 )
             return self._available
 
+    def model_catalog(self) -> list[dict[str, Any]]:
+        """Installed models with size and parameter count, for a picker UI.
+
+        Ollama reports both; OpenAI-compatible servers usually report neither,
+        so those fields come back empty rather than guessed.
+        """
+        try:
+            if self.cfg.provider == "ollama":
+                data = http_request(f"{self.cfg.base_url}/api/tags", timeout=8, retries=0).json()
+                out = []
+                for m in data.get("models", []):
+                    details = m.get("details") or {}
+                    size = int(m.get("size") or 0)
+                    out.append({
+                        "name": m.get("name", ""),
+                        "bytes": size,
+                        "size": _human_gb(size),
+                        "params": details.get("parameter_size", ""),
+                        "family": details.get("family", ""),
+                        "quantization": details.get("quantization_level", ""),
+                        # Embedding models cannot chat, and chat models embed
+                        # badly. Flagging it here stops the obvious mis-pick.
+                        "embedding": _looks_like_embedder(m.get("name", ""), details),
+                    })
+                return sorted(out, key=lambda m: m["name"])
+
+            data = http_request(f"{self.cfg.base_url}/v1/models", timeout=8, retries=0).json()
+            return [
+                {"name": m.get("id", ""), "bytes": 0, "size": "", "params": "",
+                 "family": "", "quantization": "",
+                 "embedding": _looks_like_embedder(m.get("id", ""), {})}
+                for m in data.get("data", [])
+            ]
+        except (HttpError, ValueError, KeyError, TypeError):
+            return []
+
     def installed_models(self) -> list[str]:
         try:
             if self.cfg.provider == "ollama":
@@ -248,6 +284,21 @@ class LocalLLM:
         except (HttpError, ValueError, KeyError, IndexError) as e:
             log.warning("embedding failed (%s) — continuing without vectors", e)
             return None
+
+
+def _human_gb(n: int) -> str:
+    if not n:
+        return ""
+    gb = n / (1024**3)
+    return f"{gb:.1f} GB" if gb >= 1 else f"{n / (1024**2):.0f} MB"
+
+
+_EMBED_HINTS = ("embed", "bge", "gte", "e5-", "minilm", "nomic-embed", "mxbai")
+
+
+def _looks_like_embedder(name: str, details: dict) -> bool:
+    low = f"{name} {details.get('family', '')}".lower()
+    return any(h in low for h in _EMBED_HINTS)
 
 
 def cosine(a: list[float], b: list[float]) -> float:

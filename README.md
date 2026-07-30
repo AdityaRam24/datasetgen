@@ -99,7 +99,7 @@ that have not changed and only regenerates what actually moved.
 python -m datagen serve          # opens http://127.0.0.1:8800
 ```
 
-Eight tabs covering everything you'd otherwise do on the command line:
+Ten tabs covering everything you'd otherwise do on the command line:
 
 | Tab | |
 |---|---|
@@ -111,6 +111,32 @@ Eight tabs covering everything you'd otherwise do on the command line:
 | **Teach** | Add a Q&A pair, a solved case, or paste raw notes |
 | **Analyze** | Token stats, truncation and leakage checks |
 | **Exports** | List and download every generated file |
+| **Confluence** | Credentials, space picker, page limits, connection test |
+| **Settings** | Model picker, generation and quality settings — configure once, not every run |
+
+### Settings
+
+Scans your local endpoint and lists the installed models with parameter counts and sizes,
+so you pick from what you actually have rather than typing a name and hoping. Embedding
+models are detected and shown separately — picking a chat model as your embedder (or vice
+versa) is an easy mistake that quietly degrades dedupe.
+
+Also covers generation kinds, pairs per chunk, workers, chunk size, and the quality
+threshold. Everything is written back to `config.toml` **preserving your comments** — the
+file is parsed before saving and the write is refused if the result would not be valid
+TOML.
+
+A non-local `base_url` is rejected outright. This project is local-only by design, and
+silently shipping your corpus to a cloud endpoint because of a typo is not a failure mode
+worth allowing.
+
+### Confluence
+
+Credentials go to `.env` (git-ignored); everything else to `config.toml`. **Test
+connection** verifies auth before you commit to a run, and once connected the page lists
+the spaces your token can actually see — click to add them rather than guessing space
+keys. A stored token is only ever sent back to the browser masked, and leaving the field
+blank keeps the existing one.
 
 It's the same stack as everything else — **stdlib only**, no Flask, no CDN, no
 build step. The page is one self-contained HTML file.
@@ -440,7 +466,7 @@ dataset-generation/
 ├── data/                    state.db, records.jsonl, quarantine.jsonl
 ├── exports/                 the dataset
 ├── searxng/                 local search: compose file, settings, setup script
-├── tests/test_datagen.py    73 tests, no network, no LLM
+├── tests/test_datagen.py    84 tests, no network, no LLM
 └── datagen/
     ├── __main__.py          CLI
     ├── learn.py             input you provide -> dataset records

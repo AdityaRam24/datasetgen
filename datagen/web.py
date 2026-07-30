@@ -176,6 +176,158 @@ def update_keywords(config_path: Path, terms: list[str]) -> bool:
     return True
 
 
+def render_toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(f'"{str(v)}"' for v in value) + "]"
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _section_bounds(text: str, section: str) -> tuple[int, int] | None:
+    """Character span of a `[section]` or `[[section]]` table body."""
+    header = re.compile(
+        rf"^\[\[?{re.escape(section)}\]\]?\s*$", re.M
+    )
+    m = header.search(text)
+    if not m:
+        return None
+    start = m.end()
+    nxt = re.compile(r"^\[", re.M).search(text, start)
+    return start, (nxt.start() if nxt else len(text))
+
+
+# A key's value may be a single line, a bracketed list spanning lines, or a
+# triple-quoted string. Matching all three keeps us from corrupting the file.
+def _value_span(body: str, key: str) -> tuple[int, int, int] | None:
+    m = re.search(rf"^(\s*{re.escape(key)}\s*=\s*)", body, re.M)
+    if not m:
+        return None
+    vstart = m.end()
+    rest = body[vstart:]
+
+    if rest.lstrip().startswith('"""'):
+        lead = len(rest) - len(rest.lstrip())
+        close = rest.find('"""', lead + 3)
+        end = vstart + (close + 3 if close != -1 else len(rest))
+    elif rest.lstrip().startswith("["):
+        depth, i = 0, len(rest) - len(rest.lstrip())
+        while i < len(rest):
+            if rest[i] == "[":
+                depth += 1
+            elif rest[i] == "]":
+                depth -= 1
+                if depth == 0:
+                    i += 1
+                    break
+            i += 1
+        end = vstart + i
+    else:
+        nl = rest.find("\n")
+        line = rest if nl == -1 else rest[:nl]
+        # Keep any trailing comment on the line.
+        hash_at = line.find("#")
+        end = vstart + (len(line.rstrip()) if hash_at == -1 else hash_at)
+    return m.start(), vstart, end
+
+
+def update_toml(config_path: Path, section: str, changes: dict[str, Any]) -> list[str]:
+    """Set keys inside one TOML table, preserving comments and everything else.
+
+    tomllib is read-only, and a TOML *writer* would reformat the whole file and
+    throw away the comments that make config.toml self-documenting. So this
+    edits in place: existing keys have just their value replaced, missing keys
+    are appended to the end of the table.
+
+    Returns the list of keys actually changed. Raises if the section is missing
+    or the result would not parse.
+    """
+    import tomllib
+
+    text = config_path.read_text(encoding="utf-8")
+    bounds = _section_bounds(text, section)
+    if not bounds:
+        raise ValueError(f"[{section}] not found in {config_path.name}")
+
+    start, end = bounds
+    body = text[start:end]
+    changed: list[str] = []
+
+    for key, value in changes.items():
+        if value is None:
+            continue
+        rendered = render_toml_value(value)
+        span = _value_span(body, key)
+        if span:
+            _, vstart, vend = span
+            if body[vstart:vend].strip() == rendered:
+                continue
+            body = body[:vstart] + rendered + body[vend:]
+        else:
+            body = body.rstrip("\n") + f"\n{key} = {rendered}\n"
+        changed.append(key)
+
+    if not changed:
+        return []
+
+    updated = text[:start] + body + text[end:]
+    try:
+        tomllib.loads(updated)
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"refusing to write invalid TOML: {e}") from e
+
+    config_path.write_text(updated, encoding="utf-8")
+    return changed
+
+
+def update_env(env_path: Path, values: dict[str, str]) -> list[str]:
+    """Set KEY=VALUE lines in .env, preserving comments and ordering.
+
+    Also applies the values to the current process, because .env is only read
+    at startup and the caller expects the change to take effect now.
+    """
+    import os
+
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    changed: list[str] = []
+
+    for key, value in values.items():
+        if value is None:
+            continue
+        value = str(value)
+        line = f"{key}={value}"
+        for i, existing in enumerate(lines):
+            stripped = existing.strip()
+            if stripped.startswith("#") or "=" not in stripped:
+                continue
+            if stripped.split("=", 1)[0].strip() == key:
+                if existing != line:
+                    lines[i] = line
+                    changed.append(key)
+                break
+        else:
+            lines.append(line)
+            changed.append(key)
+        os.environ[key] = value          # .env is only read at startup
+
+    if changed:
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return changed
+
+
+def mask_secret(value: str) -> str:
+    """Never send a stored token back to the browser in full."""
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "•" * len(value)
+    return f"{value[:4]}{'•' * 12}{value[-4:]}"
+
+
 def update_project(config_path: Path, name: str | None, description: str | None) -> bool:
     text = original = config_path.read_text(encoding="utf-8")
     if name:
@@ -311,6 +463,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self._analysis(query))
             if path == "/api/exports":
                 return self._json(self._exports())
+            if path == "/api/models":
+                return self._json(self._models())
+            if path == "/api/settings":
+                return self._json(self._settings())
+            if path == "/api/confluence":
+                return self._json(self._confluence_get())
+            if path == "/api/confluence/spaces":
+                return self._json(self._confluence_spaces())
             if path.startswith("/download/"):
                 return self._download(path[len("/download/"):])
             return self._error("not found", 404)
@@ -332,6 +492,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self._project(body))
             if path == "/api/learn":
                 return self._json(self._learn(body))
+            if path == "/api/settings":
+                return self._json(self._settings_save(body))
+            if path == "/api/confluence":
+                return self._json(self._confluence_save(body))
+            if path == "/api/confluence/test":
+                return self._json(self._confluence_test())
             return self._error("not found", 404)
         except ValueError as e:
             self._error(str(e), 400)
@@ -577,6 +743,247 @@ class Handler(BaseHTTPRequestHandler):
             export_all(cfg, all_records, None)
         self.jobs.note(f"learned a {rec.kind} record: {truncate(rec.instruction, 60)}")
         return {"ok": True, "kind": rec.kind, "id": rec.id, "async": False}
+
+    # -- settings -----------------------------------------------------------
+
+    def _reload(self) -> None:
+        """Re-read config.toml and rebuild the LLM client after a settings save."""
+        self.server.cfg = load_config(str(self.cfg.root / "config.toml"))
+        self.server.llm = LocalLLM(self.server.cfg.llm)
+
+    def _models(self) -> dict:
+        llm = self.server.llm
+        models = llm.model_catalog()
+        return {
+            "ok": True,
+            "reachable": llm.available(recheck=True),
+            "base_url": llm.cfg.base_url,
+            "provider": llm.cfg.provider,
+            "models": models,
+            "chat": [m for m in models if not m["embedding"]],
+            "embedding": [m for m in models if m["embedding"]],
+        }
+
+    def _settings(self) -> dict:
+        cfg = self.cfg
+        return {
+            "ok": True,
+            "llm": {
+                "provider": cfg.llm.provider,
+                "base_url": cfg.llm.base_url,
+                "model": cfg.llm.model,
+                "embed_model": cfg.llm.embed_model,
+                "embed_enabled": cfg.llm.embed_enabled,
+                "temperature": cfg.llm.temperature,
+                "num_ctx": cfg.llm.num_ctx,
+                "available": self.server.llm.available(),
+            },
+            "generation": {
+                "kinds": cfg.generation.kinds,
+                "pairs_per_chunk": cfg.generation.pairs_per_chunk,
+                "max_workers": cfg.generation.max_workers,
+            },
+            "chunking": {"max_chars": cfg.chunking.max_chars, "overlap": cfg.chunking.overlap},
+            "quality": {"enabled": cfg.quality.enabled, "min_score": cfg.quality.min_score},
+            "project": {"name": cfg.name, "description": cfg.description},
+            "config_path": str(cfg.root / "config.toml"),
+        }
+
+    def _settings_save(self, body: dict) -> dict:
+        path = self.cfg.root / "config.toml"
+        changed: list[str] = []
+
+        llm = body.get("llm") or {}
+        if llm:
+            provider = str(llm.get("provider") or "").strip() or None
+            base_url = str(llm.get("base_url") or "").strip() or None
+            if provider and provider not in ("ollama", "openai_compat", "none"):
+                raise ValueError("provider must be ollama, openai_compat or none")
+            if base_url:
+                # This project is local-only by design; refuse a cloud endpoint
+                # rather than silently sending the corpus somewhere.
+                from .config import LLMConfig
+
+                if not LLMConfig(base_url=base_url).is_local:
+                    raise ValueError(
+                        f"{base_url} is not a local or private address. This tool is "
+                        "local-LLM only — use localhost, a LAN address, or a .local host."
+                    )
+            changed += update_toml(path, "llm", {
+                "provider": provider,
+                "base_url": base_url,
+                "model": str(llm.get("model") or "").strip() or None,
+                "temperature": llm.get("temperature"),
+                "num_ctx": llm.get("num_ctx"),
+            })
+            embed = {}
+            if llm.get("embed_model") is not None:
+                embed["model"] = str(llm["embed_model"]).strip()
+            if llm.get("embed_enabled") is not None:
+                embed["enabled"] = bool(llm["embed_enabled"])
+            if embed:
+                changed += update_toml(path, "llm.embeddings", embed)
+
+        gen = body.get("generation") or {}
+        if gen:
+            changed += update_toml(path, "generation", {
+                "kinds": gen.get("kinds"),
+                "pairs_per_chunk": gen.get("pairs_per_chunk"),
+                "max_workers": gen.get("max_workers"),
+            })
+
+        chunking = body.get("chunking") or {}
+        if chunking:
+            changed += update_toml(path, "chunking", {
+                "max_chars": chunking.get("max_chars"),
+                "overlap": chunking.get("overlap"),
+            })
+
+        quality = body.get("quality") or {}
+        if quality:
+            changed += update_toml(path, "quality", {
+                "enabled": quality.get("enabled"),
+                "min_score": quality.get("min_score"),
+            })
+
+        project = body.get("project") or {}
+        if project:
+            if update_project(path, str(project.get("name") or "").strip() or None,
+                              project.get("description")):
+                changed.append("project")
+
+        self._reload()
+        if changed:
+            self.jobs.note(f"settings saved: {', '.join(changed)}")
+        return {"ok": True, "changed": changed, "settings": self._settings()}
+
+    # -- confluence ---------------------------------------------------------
+
+    def _confluence_block(self) -> dict:
+        blocks = self.cfg.sources.get("confluence") or []
+        blocks = blocks if isinstance(blocks, list) else [blocks]
+        return blocks[0] if blocks else {}
+
+    def _confluence_get(self) -> dict:
+        import os
+
+        from .connectors.confluence import ConfluenceClient, build_cql
+
+        block = self._confluence_block()
+        client = ConfluenceClient()
+        token = os.getenv("CONFLUENCE_TOKEN", "")
+        return {
+            "ok": True,
+            "configured": client.configured,
+            "credentials": {
+                "base_url": client.base_url,
+                "user": client.user,
+                "token_set": bool(token),
+                "token_masked": mask_secret(token),
+                "mode": "cloud (basic auth)" if client.user else
+                        ("server/DC (bearer token)" if token else "not set"),
+            },
+            "source": {
+                "enabled": bool(block.get("enabled", False)),
+                "spaces": list(block.get("spaces", [])),
+                "cql": block.get("cql", ""),
+                "max_pages": int(block.get("max_pages", 25)),
+                "include_attachments": bool(block.get("include_attachments", True)),
+                "updated_since": block.get("updated_since", ""),
+            },
+            "effective_cql": build_cql(block),
+            "env_path": str(self.cfg.root / ".env"),
+        }
+
+    def _confluence_save(self, body: dict) -> dict:
+        creds = body.get("credentials") or {}
+        env_changes: dict[str, str] = {}
+        for field, key in (("base_url", "CONFLUENCE_BASE_URL"),
+                           ("user", "CONFLUENCE_USER"),
+                           ("token", "CONFLUENCE_TOKEN")):
+            if field in creds and creds[field] is not None:
+                value = str(creds[field]).strip()
+                # A masked token means "unchanged" — never write the dots back.
+                if field == "token" and ("•" in value or not value):
+                    continue
+                if field == "base_url":
+                    value = value.rstrip("/")
+                    if value and not value.startswith(("http://", "https://")):
+                        raise ValueError("base URL must start with http:// or https://")
+                env_changes[key] = value
+
+        changed_env = update_env(self.cfg.root / ".env", env_changes) if env_changes else []
+
+        source = body.get("source") or {}
+        changed_cfg: list[str] = []
+        if source:
+            spaces = source.get("spaces")
+            if isinstance(spaces, str):
+                spaces = [s.strip() for s in spaces.split(",") if s.strip()]
+            changed_cfg = update_toml(
+                self.cfg.root / "config.toml", "sources.confluence",
+                {
+                    "enabled": source.get("enabled"),
+                    "spaces": spaces,
+                    "cql": source.get("cql"),
+                    "max_pages": source.get("max_pages"),
+                    "include_attachments": source.get("include_attachments"),
+                    "updated_since": source.get("updated_since"),
+                },
+            )
+
+        self._reload()
+        note = ", ".join(changed_env + changed_cfg)
+        if note:
+            self.jobs.note(f"confluence settings saved: {note}")
+        return {"ok": True, "changed": changed_env + changed_cfg,
+                "confluence": self._confluence_get()}
+
+    def _confluence_test(self) -> dict:
+        from .connectors.confluence import ConfluenceClient
+
+        client = ConfluenceClient()
+        if not client.configured:
+            return {"ok": False, "error":
+                    "Set the base URL and token first — then Test again."}
+        if not client.ping():
+            return {"ok": False, "error":
+                    f"Could not reach {client.base_url}. Check the URL, the token, and "
+                    "(for Cloud) that the email address is right. Server/Data Center "
+                    "needs the user field EMPTY."}
+        spaces = self._confluence_spaces()
+        return {
+            "ok": True,
+            "base_url": client.base_url,
+            "mode": "cloud" if client.user else "server/DC",
+            "spaces_visible": len(spaces.get("spaces", [])),
+            "message": f"Connected to {client.base_url} — "
+                       f"{len(spaces.get('spaces', []))} spaces visible.",
+        }
+
+    def _confluence_spaces(self) -> dict:
+        """List spaces the token can see, so keys can be picked rather than typed."""
+        from .connectors.confluence import ConfluenceClient
+        from .util import HttpError, http_request
+
+        client = ConfluenceClient()
+        if not client.configured:
+            return {"ok": False, "error": "not configured", "spaces": []}
+        try:
+            data = http_request(
+                f"{client.base_url}/rest/api/space?limit=200",
+                headers=client.headers, timeout=30, retries=0,
+            ).json()
+        except (HttpError, ValueError) as e:
+            return {"ok": False, "error": str(e), "spaces": []}
+
+        return {
+            "ok": True,
+            "spaces": [
+                {"key": s.get("key", ""), "name": s.get("name", ""), "type": s.get("type", "")}
+                for s in data.get("results", []) if s.get("key")
+            ],
+        }
 
     def _records(self, query: dict) -> dict:
         from .analyze import load_records

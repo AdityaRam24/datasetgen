@@ -126,6 +126,22 @@
   .spin { display: inline-block; width: 11px; height: 11px; border: 2px solid var(--line);
           border-top-color: var(--accent); border-radius: 50%; animation: s .7s linear infinite; }
   @keyframes s { to { transform: rotate(360deg); } }
+
+  .modelgrid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); }
+  .model {
+    border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px;
+    background: var(--panel2); cursor: pointer; transition: .12s;
+  }
+  .model:hover { border-color: var(--accent); }
+  .model.sel { border-color: var(--accent);
+               background: color-mix(in srgb, var(--accent) 12%, var(--panel2)); }
+  .model .nm { font-weight: 570; font-size: 13px; word-break: break-all; }
+  .model .mt { color: var(--dim); font-size: 11.5px; margin-top: 2px; }
+  .spacechip {
+    display: inline-block; border: 1px solid var(--line); background: var(--panel2);
+    border-radius: 5px; padding: 2px 8px; margin: 0 5px 5px 0; cursor: pointer; font-size: 12px;
+  }
+  .spacechip:hover { border-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -151,6 +167,8 @@
   <button data-tab="teach">Teach</button>
   <button data-tab="analyze">Analyze</button>
   <button data-tab="exports">Exports</button>
+  <button data-tab="confluence">Confluence</button>
+  <button data-tab="settings">Settings</button>
 </nav>
 
 <main>
@@ -317,6 +335,185 @@
       <div id="explist"></div>
     </div>
   </section>
+
+  <!-- CONFLUENCE -->
+  <section id="confluence">
+    <div class="card">
+      <h2>Connection</h2>
+      <p class="hint">
+        Credentials are written to <code id="envpath">.env</code>, which is
+        git-ignored. The token is only ever used for GET requests — nothing is
+        written back to your wiki.
+      </p>
+      <div id="cfStatus" style="margin-bottom:14px"></div>
+
+      <label>Base URL</label>
+      <input id="cfUrl" placeholder="https://your-org.atlassian.net/wiki">
+      <p class="hint" style="margin:4px 0 0">
+        Atlassian Cloud: include the <code>/wiki</code> suffix.
+        Server / Data Center: just the host, e.g. <code>https://wiki.company.com</code>.
+      </p>
+
+      <label>Email <span style="opacity:.7">— Cloud only. Leave EMPTY for Server / Data Center.</span></label>
+      <input id="cfUser" placeholder="you@example.com">
+
+      <label>API token / Personal Access Token</label>
+      <input id="cfToken" type="password" placeholder="paste token">
+      <p class="hint" style="margin:4px 0 0">
+        Cloud: create one at
+        <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noreferrer">id.atlassian.com</a>
+        — it is <em>not</em> your password. Server/DC: profile menu → Settings →
+        Personal Access Tokens.
+      </p>
+
+      <div class="row" style="margin-top:14px">
+        <button class="btn" onclick="saveConfluence()">Save</button>
+        <button class="btn ghost" onclick="testConfluence()">Test connection</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>What to pull</h2>
+      <p class="hint">Written to <code>config.toml</code>.</p>
+
+      <label style="display:flex;align-items:center;gap:8px;color:var(--fg)">
+        <input type="checkbox" id="cfEnabled" style="width:auto"> Enabled — include Confluence in every build
+      </label>
+
+      <label>Spaces</label>
+      <div id="cfSpacePicker" class="hint" style="margin:0 0 6px">
+        Connect above to list the spaces your token can see.
+      </div>
+      <input id="cfSpaces" placeholder="OPS, PCAI">
+      <p class="hint" style="margin:4px 0 0">
+        Comma-separated space keys — the code in a page URL:
+        <code>/wiki/spaces/<strong>OPS</strong>/pages/…</code>
+      </p>
+
+      <div class="grid" style="margin-top:8px">
+        <div>
+          <label>Max pages</label>
+          <input id="cfMax" type="number" min="1">
+          <p class="hint" style="margin:4px 0 0">Start small — 500 pages is hours of local generation.</p>
+        </div>
+        <div>
+          <label>Only pages edited since</label>
+          <input id="cfSince" placeholder="-30d, -6m, or 2026-01-01">
+          <p class="hint" style="margin:4px 0 0">Blank = everything.</p>
+        </div>
+      </div>
+
+      <label style="display:flex;align-items:center;gap:8px;color:var(--fg);margin-top:12px">
+        <input type="checkbox" id="cfAttach" style="width:auto"> Also parse PDF/DOCX attachments
+      </label>
+
+      <label>Raw CQL <span style="opacity:.7">— optional, overrides spaces entirely</span></label>
+      <input id="cfCql" placeholder='type = page AND label = "runbook"'>
+
+      <label>Effective query</label>
+      <div class="mono" id="cfEffective"
+           style="background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:9px;font-size:12px;color:var(--dim)"></div>
+
+      <div class="row" style="margin-top:14px">
+        <button class="btn" onclick="saveConfluence()">Save</button>
+        <button class="btn ghost" onclick="run('build')">Build now</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section id="settings">
+    <div class="card">
+      <h2>Local LLM</h2>
+      <p class="hint">
+        Saved to <code>config.toml</code> — set once, not every run. Remote
+        endpoints are rejected: this tool is local-only by design.
+      </p>
+
+      <label>Provider</label>
+      <select id="sProvider">
+        <option value="ollama">Ollama</option>
+        <option value="openai_compat">OpenAI-compatible (LM Studio, llama.cpp, vLLM)</option>
+        <option value="none">None — extractive generation only</option>
+      </select>
+
+      <label>Endpoint URL</label>
+      <div class="row">
+        <input id="sBaseUrl" style="flex:1;min-width:220px" placeholder="http://localhost:11434">
+        <button class="btn ghost" onclick="loadModels(true)">Rescan</button>
+      </div>
+      <p class="hint" style="margin:4px 0 0">
+        Ollama: <code>http://localhost:11434</code> (no <code>/v1</code> — the
+        native API is used). LM Studio and friends: the base URL, and
+        <code>/v1</code> paths are appended automatically.
+      </p>
+
+      <div id="modelStatus" style="margin-top:14px"></div>
+
+      <label>Chat / reasoning model</label>
+      <div id="chatModels" class="modelgrid"></div>
+      <div class="row" style="margin-top:8px">
+        <input id="sModel" placeholder="or type a model name" style="flex:1;min-width:200px">
+      </div>
+
+      <label style="margin-top:16px">Embedding model <span style="opacity:.7">— used for semantic dedupe</span></label>
+      <div id="embedModels" class="modelgrid"></div>
+      <div class="row" style="margin-top:8px">
+        <input id="sEmbed" placeholder="or type a model name" style="flex:1;min-width:200px">
+        <label style="margin:0;display:flex;align-items:center;gap:6px;color:var(--fg)">
+          <input type="checkbox" id="sEmbedOn" style="width:auto"> enabled
+        </label>
+      </div>
+
+      <div class="grid" style="margin-top:16px">
+        <div><label>Temperature</label><input id="sTemp" type="number" step="0.1" min="0" max="2"></div>
+        <div><label>Context window (num_ctx)</label><input id="sCtx" type="number" min="512" step="512"></div>
+      </div>
+
+      <div class="row" style="margin-top:16px"><button class="btn" onclick="saveSettings()">Save</button></div>
+    </div>
+
+    <div class="card">
+      <h2>Generation</h2>
+      <label>Record kinds</label>
+      <div class="row" id="sKinds"></div>
+      <div class="grid" style="margin-top:14px">
+        <div>
+          <label>Pairs per chunk</label><input id="sPairs" type="number" min="1" max="12">
+          <p class="hint" style="margin:4px 0 0">More rows per chunk, proportionally slower.</p>
+        </div>
+        <div>
+          <label>Workers</label><input id="sWorkers" type="number" min="1" max="8">
+          <p class="hint" style="margin:4px 0 0">Above ~4 a single GPU usually gets slower, not faster.</p>
+        </div>
+      </div>
+      <div class="grid" style="margin-top:14px">
+        <div><label>Chunk size (chars)</label><input id="sChunk" type="number" min="200" step="100"></div>
+        <div><label>Chunk overlap</label><input id="sOverlap" type="number" min="0" step="50"></div>
+      </div>
+      <div class="grid" style="margin-top:14px">
+        <div>
+          <label>Quality threshold</label><input id="sMinScore" type="number" step="0.05" min="0" max="1">
+          <p class="hint" style="margin:4px 0 0">Below this, rows are quarantined rather than deleted.</p>
+        </div>
+        <div>
+          <label style="display:flex;align-items:center;gap:8px;color:var(--fg);margin-top:26px">
+            <input type="checkbox" id="sQualityOn" style="width:auto"> Quality gate enabled
+          </label>
+        </div>
+      </div>
+      <div class="row" style="margin-top:16px"><button class="btn" onclick="saveSettings()">Save</button></div>
+    </div>
+
+    <div class="card">
+      <h2>Config file</h2>
+      <p class="hint">
+        Everything above is written here. Comments and unrelated settings are
+        preserved, and the file is validated before it is saved.
+      </p>
+      <div class="mono" id="cfgPath" style="font-size:12px;color:var(--dim)"></div>
+    </div>
+  </section>
 </main>
 
 <script>
@@ -332,6 +529,8 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   if (b.dataset.tab === 'browse') loadRecords();
   if (b.dataset.tab === 'exports') loadExports();
   if (b.dataset.tab === 'analyze') loadAnalysis();
+  if (b.dataset.tab === 'settings') loadSettings();
+  if (b.dataset.tab === 'confluence') loadConfluence();
 });
 
 function flash(text, ok = true) {
@@ -601,6 +800,175 @@ async function loadExports() {
           <td><a href="/download/${encodeURIComponent(f.name)}">download</a></td></tr>`).join('') + '</table>'
       : '<div class="empty">Nothing exported yet — run a build.</div>';
   } catch (e) { $('#explist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+
+/* ---------- settings ---------- */
+const KINDS = ['qa', 'instruction', 'troubleshooting', 'glossary'];
+let settings = null, models = null;
+
+async function loadSettings() {
+  try { settings = await api('/api/settings'); } catch (e) { return flash(e.message, false); }
+  const l = settings.llm, g = settings.generation, c = settings.chunking, q = settings.quality;
+  $('#sProvider').value = l.provider;
+  $('#sBaseUrl').value = l.base_url;
+  $('#sModel').value = l.model;
+  $('#sEmbed').value = l.embed_model;
+  $('#sEmbedOn').checked = l.embed_enabled;
+  $('#sTemp').value = l.temperature;
+  $('#sCtx').value = l.num_ctx;
+  $('#sPairs').value = g.pairs_per_chunk;
+  $('#sWorkers').value = g.max_workers;
+  $('#sChunk').value = c.max_chars;
+  $('#sOverlap').value = c.overlap;
+  $('#sMinScore').value = q.min_score;
+  $('#sQualityOn').checked = q.enabled;
+  $('#cfgPath').textContent = settings.config_path;
+
+  $('#sKinds').innerHTML = KINDS.map(k => `
+    <label style="margin:0;display:flex;align-items:center;gap:6px;color:var(--fg)">
+      <input type="checkbox" style="width:auto" value="${k}" ${g.kinds.includes(k) ? 'checked' : ''}> ${k}
+    </label>`).join('');
+
+  loadModels();
+}
+
+async function loadModels(rescan) {
+  const box = $('#modelStatus');
+  if (rescan) box.innerHTML = '<span class="spin"></span> scanning…';
+  try {
+    models = await api('/api/models');
+  } catch (e) {
+    box.innerHTML = `<div class="warnbox">${esc(e.message)}</div>`;
+    return;
+  }
+  box.innerHTML = models.reachable
+    ? `<div class="hint" style="color:var(--ok)">● ${models.models.length} models installed at ${esc(models.base_url)}</div>`
+    : `<div class="warnbox">Not reachable at ${esc(models.base_url)} — start it with <code>ollama serve</code>.
+       Builds still work, but they fall back to extractive generation.</div>`;
+
+  const card = (m, target) => `
+    <div class="model ${$(target).value === m.name ? 'sel' : ''}" onclick="pickModel('${target}','${esc(m.name)}')">
+      <div class="nm">${esc(m.name)}</div>
+      <div class="mt">${[m.params, m.size, m.quantization].filter(Boolean).map(esc).join(' · ') || 'installed'}</div>
+    </div>`;
+
+  $('#chatModels').innerHTML = models.chat.length
+    ? models.chat.map(m => card(m, '#sModel')).join('')
+    : '<div class="hint">No chat models found.</div>';
+  $('#embedModels').innerHTML = models.embedding.length
+    ? models.embedding.map(m => card(m, '#sEmbed')).join('')
+    : `<div class="hint">No embedding model installed — <code>ollama pull nomic-embed-text</code>.
+       Without one, semantic dedupe is skipped (exact + simhash still run).</div>`;
+}
+
+function pickModel(target, name) {
+  $(target).value = name;
+  loadModels();
+}
+
+async function saveSettings() {
+  const kinds = [...$('#sKinds').querySelectorAll('input:checked')].map(i => i.value);
+  if (!kinds.length) return flash('Pick at least one record kind', false);
+  const num = (sel, int) => { const v = $(sel).value; return v === '' ? null : (int ? parseInt(v) : parseFloat(v)); };
+  try {
+    const d = await api('/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        llm: {
+          provider: $('#sProvider').value, base_url: $('#sBaseUrl').value.trim(),
+          model: $('#sModel').value.trim(), embed_model: $('#sEmbed').value.trim(),
+          embed_enabled: $('#sEmbedOn').checked,
+          temperature: num('#sTemp'), num_ctx: num('#sCtx', true),
+        },
+        generation: { kinds, pairs_per_chunk: num('#sPairs', true), max_workers: num('#sWorkers', true) },
+        chunking: { max_chars: num('#sChunk', true), overlap: num('#sOverlap', true) },
+        quality: { enabled: $('#sQualityOn').checked, min_score: num('#sMinScore') },
+      }),
+    });
+    flash(d.changed.length ? 'Saved: ' + d.changed.join(', ') : 'No changes');
+    loadSettings(); refresh();
+  } catch (e) { flash(e.message, false); }
+}
+
+/* ---------- confluence ---------- */
+let conf = null;
+
+async function loadConfluence() {
+  try { conf = await api('/api/confluence'); } catch (e) { return flash(e.message, false); }
+  const c = conf.credentials, s = conf.source;
+  $('#envpath').textContent = conf.env_path;
+  $('#cfUrl').value = c.base_url;
+  $('#cfUser').value = c.user;
+  $('#cfToken').placeholder = c.token_set ? c.token_masked + '  (leave blank to keep)' : 'paste token';
+  $('#cfEnabled').checked = s.enabled;
+  $('#cfSpaces').value = s.spaces.join(', ');
+  $('#cfMax').value = s.max_pages;
+  $('#cfSince').value = s.updated_since || '';
+  $('#cfAttach').checked = s.include_attachments;
+  $('#cfCql').value = s.cql || '';
+  $('#cfEffective').textContent = conf.effective_cql;
+
+  $('#cfStatus').innerHTML = conf.configured
+    ? `<div class="hint" style="color:var(--ok)">● credentials set — ${esc(c.mode)} — ${esc(c.base_url)}</div>`
+    : `<div class="warnbox">Not configured yet. Fill in the base URL and token below, then Test.</div>`;
+
+  if (conf.configured) loadSpaces();
+}
+
+async function loadSpaces() {
+  const box = $('#cfSpacePicker');
+  box.innerHTML = '<span class="spin"></span> listing spaces…';
+  try {
+    const d = await api('/api/confluence/spaces');
+    box.innerHTML = d.spaces.length
+      ? 'Click to add: ' + d.spaces.map(s =>
+          `<span class="spacechip" onclick="addSpace('${esc(s.key)}')" title="${esc(s.name)}">${esc(s.key)}</span>`).join('')
+      : '<span style="color:var(--dim)">No spaces visible to this token.</span>';
+  } catch (e) {
+    box.innerHTML = `<span style="color:var(--dim)">Could not list spaces: ${esc(e.message)}</span>`;
+  }
+}
+
+function addSpace(key) {
+  const el = $('#cfSpaces');
+  const cur = el.value.split(',').map(s => s.trim()).filter(Boolean);
+  if (!cur.includes(key)) cur.push(key);
+  el.value = cur.join(', ');
+}
+
+async function saveConfluence() {
+  try {
+    const d = await api('/api/confluence', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        credentials: {
+          base_url: $('#cfUrl').value.trim(),
+          user: $('#cfUser').value.trim(),
+          token: $('#cfToken').value.trim(),   // blank = keep existing
+        },
+        source: {
+          enabled: $('#cfEnabled').checked,
+          spaces: $('#cfSpaces').value,
+          cql: $('#cfCql').value.trim(),
+          max_pages: parseInt($('#cfMax').value) || 25,
+          include_attachments: $('#cfAttach').checked,
+          updated_since: $('#cfSince').value.trim(),
+        },
+      }),
+    });
+    $('#cfToken').value = '';
+    flash(d.changed.length ? 'Saved: ' + d.changed.join(', ') : 'No changes');
+    loadConfluence(); refresh();
+  } catch (e) { flash(e.message, false); }
+}
+
+async function testConfluence() {
+  flash('Testing…');
+  try {
+    const d = await api('/api/confluence/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    flash(d.message);
+    loadConfluence();
+  } catch (e) { flash(e.message, false); }
 }
 
 /* ---------- boot ---------- */
