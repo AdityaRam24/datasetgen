@@ -15,6 +15,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from datagen.analyze import (                                     # noqa: E402
+    LengthStats, analyze, check_leakage, dataset_card, find_degenerate, percentile,
+)
 from datagen.chunking import chunk_document                      # noqa: E402
 from datagen.config import ChunkingConfig, LLMConfig, QualityConfig, load_config  # noqa: E402
 from datagen.connectors.files import read_file                    # noqa: E402
@@ -34,7 +37,9 @@ from datagen.learn import case_record, document_from_text, pair_record  # noqa: 
 from datagen.models import Chunk, Document, Record               # noqa: E402
 from datagen.quality import grounding_score, heuristic_check     # noqa: E402
 from datagen.state import StateStore, _to_signed64, _to_unsigned64  # noqa: E402
-from datagen.util import clean_text, extract_json, tokenize      # noqa: E402
+from datagen.util import (                                        # noqa: E402
+    clean_text, estimate_tokens, extract_json, tokenize,
+)
 
 
 def make_doc(text: str, title: str = "Doc", kind: str = "markdown") -> Document:
@@ -496,6 +501,103 @@ class TestSearch(unittest.TestCase):
         # A stopped container must degrade, never abort a run.
         self.assertFalse(searxng_available("http://127.0.0.1:9"))
         self.assertFalse(searxng_available(""))
+
+
+class TestAnalyze(unittest.TestCase):
+    def _rec(self, q: str, a: str, kind: str = "qa", url: str = "file:///a") -> Record:
+        doc = make_doc(a, title="Src")
+        doc.url = url
+        chunk = Chunk.make(doc, a, 0)
+        chunk.url = url
+        rec = Record.make(kind, q, a, chunk)
+        rec.score = 1.0
+        return rec
+
+    def test_percentile_interpolates(self):
+        vals = [1, 2, 3, 4, 5]
+        self.assertEqual(percentile(vals, 0.0), 1)
+        self.assertEqual(percentile(vals, 0.5), 3)
+        self.assertEqual(percentile(vals, 1.0), 5)
+        self.assertEqual(percentile([], 0.5), 0.0)
+        self.assertEqual(percentile([7], 0.9), 7)
+
+    def test_length_stats_ordering(self):
+        stats = LengthStats.of([1, 2, 3, 4, 5, 6, 7, 8, 9, 100])
+        self.assertEqual(stats.count, 10)
+        self.assertEqual(stats.minimum, 1)
+        self.assertEqual(stats.maximum, 100)
+        self.assertLessEqual(stats.p50, stats.p90)
+        self.assertLessEqual(stats.p90, stats.p95)
+
+    def test_token_estimate_is_conservative_for_dense_text(self):
+        # Code/CLI text tokenizes denser than prose; the word rule must win so
+        # truncation warnings do not under-count.
+        dense = "kubectl -n mlis scale deploy x --replicas=0 && kubectl get po -o wide"
+        self.assertGreaterEqual(estimate_tokens(dense), len(dense) // 4)
+        self.assertEqual(estimate_tokens(""), 0)
+
+    def test_truncation_is_detected(self):
+        long_answer = "word " * 3000
+        cfg = load_config()
+        rep = analyze([self._rec("A long one?", long_answer)], cfg, max_seq_len=512)
+        self.assertEqual(rep.over_limit, 1)
+        self.assertEqual(rep.over_limit_pct, 100.0)
+        self.assertTrue(any("TRUNCATED" in w for w in rep.warnings))
+        self.assertTrue(rep.longest_examples)
+
+    def test_no_truncation_warning_when_everything_fits(self):
+        cfg = load_config()
+        rep = analyze([self._rec("Short?", "A short but complete answer about GPUs.")],
+                      cfg, max_seq_len=2048)
+        self.assertEqual(rep.over_limit, 0)
+        self.assertFalse(any("TRUNCATED" in w for w in rep.warnings))
+
+    def test_leakage_between_splits_is_caught(self):
+        shared = "How do I free a GPU allocation?"
+        train = [self._rec(shared, "Scale to zero replicas.", url="file:///a")]
+        evalset = [self._rec(shared, "Scale the deployment to zero.", url="file:///b")]
+        count, examples = check_leakage(train, evalset)
+        self.assertEqual(count, 1)
+        self.assertTrue(examples)
+
+    def test_disjoint_splits_report_no_leakage(self):
+        train = [self._rec("How do I free a GPU?", "Scale to zero.")]
+        evalset = [self._rec("Where are model artifacts stored?", "In the lakehouse bucket.")]
+        self.assertEqual(check_leakage(train, evalset)[0], 0)
+        self.assertEqual(check_leakage([], evalset)[0], 0)   # empty split is not a leak
+
+    def test_degenerate_rows_are_flagged(self):
+        bad = find_degenerate([
+            self._rec("Empty?", ""),
+            self._rec("Cut off?", "The procedure continues with the next step and then"),
+            self._rec("Fenced?", "Run this:\n```\nkubectl get pods\n"),
+            self._rec("Fine?", "This is a complete, properly terminated answer."),
+        ])
+        self.assertEqual(bad.get("empty_output"), 1)
+        self.assertEqual(bad.get("answer_looks_truncated"), 2)  # the empty-ish + fenced
+        self.assertEqual(bad.get("unbalanced_code_fence"), 1)
+
+    def test_small_dataset_warns_about_fine_tuning_viability(self):
+        cfg = load_config()
+        rep = analyze([self._rec(f"Q{i}?", f"A complete answer number {i}.") for i in range(5)],
+                      cfg)
+        self.assertTrue(any("fine-tune" in w for w in rep.warnings))
+
+    def test_card_contains_provenance_and_limitations(self):
+        cfg = load_config()
+        rep = analyze([self._rec("How do I free a GPU?", "Scale the endpoint to zero replicas.")],
+                      cfg)
+        card = dataset_card(rep, cfg)
+        self.assertIn("# Dataset Card", card)
+        self.assertIn("Limitations and risks", card)
+        self.assertIn("licensing is not verified", card)
+        self.assertIn(cfg.llm.model, card)
+        self.assertIn("Synthetic", card)
+
+    def test_empty_dataset_is_reported_not_crashed(self):
+        rep = analyze([], load_config())
+        self.assertEqual(rep.total, 0)
+        self.assertTrue(rep.warnings)
 
 
 class TestLLMConfig(unittest.TestCase):

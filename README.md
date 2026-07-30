@@ -83,6 +83,7 @@ that have not changed and only regenerates what actually moved.
 | `confluence` | Pull the configured spaces (`--space OPS PCAI --attachments`) |
 | `watch` | Run forever, updating itself. `--once` for a single cycle |
 | `export` | Re-export from `data/` without regenerating anything |
+| `analyze` | **Is this trainable?** Token stats, truncation, leakage, dataset card |
 | `status` | Totals, run history, and the leads queued for next time |
 | `inspect` | Print sample records. `--rejected` shows what the quality gate threw out |
 
@@ -266,6 +267,57 @@ nothing.
 
 ---
 
+## Is it trainable? — `datagen analyze`
+
+Counts don't tell you whether a dataset will fine-tune well. Run this **before** booking
+GPU time:
+
+```bash
+python -m datagen analyze --max-seq-len 2048
+python -m datagen analyze --json --strict     # for CI: non-zero exit on any warning
+```
+
+```
+  TOKEN LENGTHS (estimated — verify with your trainer's tokenizer)
+  instruction            min       3   p50      14   p90      19   p95      22   max      33
+  output                 min      14   p50      34   p90      78   p95      91   max     100
+  instruction+output     min      22   p50      49   p90     100   p95     105   max     123
+
+  at max_seq_len=2048: OK (0.0%)
+
+  INTEGRITY
+    duplicate questions      0 exact, 0 near
+    train/eval leakage       0
+```
+
+It checks the things that silently ruin a run, roughly in order of how often they do:
+
+1. **Truncation** — rows over `max_seq_len` get cut mid-answer, teaching the model to stop
+   early. It reports the count, the worst offenders, and the limit that would cover p99.
+2. **Leakage** — the same question in train *and* eval makes your eval loss a lie.
+   Document-level splitting mostly prevents it, but two sources describing the same thing
+   still collide.
+3. **Surviving duplicates** — over-weighted rows.
+4. **Imbalance** — one kind or source dominating teaches format, not knowledge.
+5. **Volume** — it will tell you plainly when there are too few rows to be worth training
+   on, and suggest using the data for RAG instead.
+6. **Degenerate rows** — empty, one-line, or truncated-looking answers.
+
+Token counts are **estimates** (character- and word-based heuristics, no tokenizer
+dependency) and deliberately err high, so a truncation warning is worth checking rather
+than worth ignoring. Confirm against your trainer's real tokenizer before fixing
+`max_seq_len`.
+
+### DATASET_CARD.md
+
+Every export writes a dataset card next to the data — provenance, how it was built, which
+local model wrote it, composition tables, length percentiles, split methodology, and an
+honest limitations section (synthetic content, **unverified source licensing**, inherited
+source bias, what was and wasn't human-reviewed). Keep it beside any checkpoint you train
+so that in six months you can still answer "where did this data come from?".
+
+---
+
 ## Output formats
 
 | File | Use |
@@ -345,10 +397,11 @@ dataset-generation/
 ├── data/                    state.db, records.jsonl, quarantine.jsonl
 ├── exports/                 the dataset
 ├── searxng/                 local search: compose file, settings, setup script
-├── tests/test_datagen.py    50 tests, no network, no LLM
+├── tests/test_datagen.py    63 tests, no network, no LLM
 └── datagen/
     ├── __main__.py          CLI
     ├── learn.py             input you provide -> dataset records
+    ├── analyze.py           trainability report + dataset card
     ├── config.py            TOML + env, local-address guard
     ├── llm.py               Ollama / OpenAI-compatible client
     ├── state.py             SQLite: hashes, records, leads, run history

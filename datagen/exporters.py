@@ -402,6 +402,20 @@ def export_all(
         )
         written.append(cfg.export.kalam_kb_path)
 
+    # The dataset card is written on every export so it never drifts out of
+    # date relative to the data sitting next to it.
+    try:
+        from .analyze import analyze, dataset_card
+
+        report = analyze(records, cfg, train=train, evalset=evalset)
+        (out_dir / "DATASET_CARD.md").write_text(dataset_card(report, cfg), encoding="utf-8")
+        written.append("DATASET_CARD.md")
+        for warning in report.warnings:
+            log.warning("dataset: %s", warning)
+    except Exception as e:  # analysis must never block an export
+        log.warning("could not write the dataset card: %s", e)
+        report = None
+
     manifest = {
         "dataset": cfg.name,
         "generated_at": now_iso(),
@@ -417,6 +431,9 @@ def export_all(
         "mean_score": round(
             sum(r.score or 0 for r in records) / len(records), 3
         ) if records else 0,
+        "tokens_estimated": report.estimated_train_tokens if report else None,
+        "tokens_p95": report.tokens_total.p95 if report else None,
+        "warnings": report.warnings if report else [],
         "files": written,
     }
     (out_dir / "manifest.json").write_text(

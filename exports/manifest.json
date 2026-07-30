@@ -1,6 +1,6 @@
 {
   "dataset": "pcai-dataset",
-  "generated_at": "2026-07-30T19:08:14Z",
+  "generated_at": "2026-07-30T19:18:03Z",
   "generated_by": "local model qwen2.5-coder:7b via ollama (http://localhost:11434)",
   "records": 26,
   "train": 23,
@@ -20,6 +20,11 @@
     "source:ops-runbooks": 3
   },
   "mean_score": 0.956,
+  "tokens_estimated": 1243,
+  "tokens_p95": 104.8,
+  "warnings": [
+    "Only 26 records. A supervised fine-tune realistically wants 500+; below ~100 you are more likely to damage the base model than teach it. Add sources, or use this as a RAG corpus (rag_chunks.jsonl) instead of a fine-tuning set."
+  ],
   "files": [
     "dataset.jsonl",
     "train.jsonl",
@@ -33,6 +38,7 @@
     "rag_chunks.jsonl",
     "glossary.jsonl",
     "GLOSSARY.md",
-    "../server/pcai/learned.json"
+    "../server/pcai/learned.json",
+    "DATASET_CARD.md"
   ]
 }

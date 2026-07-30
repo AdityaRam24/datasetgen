@@ -163,8 +163,24 @@ def truncate(text: str, limit: int, suffix: str = " …") -> str:
 
 
 def estimate_tokens(text: str) -> int:
-    """Rough token count (~4 chars/token) — good enough for budgeting prompts."""
-    return max(1, len(text) // 4)
+    """Approximate token count without pulling in a tokenizer dependency.
+
+    Two rules of thumb for English — ~4 characters per token, and ~1.3 tokens
+    per word — and we take the LARGER. Deliberately conservative: this number
+    drives truncation warnings, and over-estimating makes you check a row that
+    was fine, while under-estimating lets a row get silently cut during
+    training. Code and CLI output tokenize denser than prose, so the word rule
+    usually wins there.
+
+    It is an estimate. For exact counts, tokenize with your trainer's own
+    tokenizer — the real one always disagrees with any heuristic by a few
+    percent.
+    """
+    if not text:
+        return 0
+    chars = len(text) / 4
+    words = len(text.split()) * 1.3
+    return max(1, int(max(chars, words)))
 
 
 # --------------------------------------------------------------------------

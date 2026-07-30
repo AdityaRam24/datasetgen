@@ -418,6 +418,35 @@ def cmd_status(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def cmd_analyze(args: argparse.Namespace, cfg: Config) -> int:
+    """Is this dataset actually trainable? Report before you burn GPU hours."""
+    from .analyze import analyze, dataset_card, load_records, report_text
+
+    records = load_records(cfg.records_path)
+    if not records:
+        print(f"\n  no records at {cfg.records_path} — run `datagen build` first\n")
+        return 1
+
+    quarantined = len(load_records(cfg.data_dir / "quarantine.jsonl"))
+    report = analyze(records, cfg, quarantined=quarantined, max_seq_len=args.max_seq_len)
+    print(report_text(report))
+
+    if args.json:
+        path = cfg.export_dir / "analysis.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report.to_dict(), indent=2, default=str), encoding="utf-8")
+        print(f"  wrote {path}")
+
+    if not args.no_card:
+        card = cfg.export_dir / "DATASET_CARD.md"
+        card.parent.mkdir(parents=True, exist_ok=True)
+        card.write_text(dataset_card(report, cfg), encoding="utf-8")
+        print(f"  wrote {card}\n")
+
+    # Non-zero when something would actually break a training run.
+    return 1 if report.warnings and args.strict else 0
+
+
 def cmd_inspect(args: argparse.Namespace, cfg: Config) -> int:
     path = cfg.data_dir / ("quarantine.jsonl" if args.rejected else "records.jsonl")
     if not path.exists():
@@ -541,6 +570,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("export", help="re-export from data/ without regenerating").set_defaults(fn=cmd_export)
     sub.add_parser("status", help="show what the dataset contains").set_defaults(fn=cmd_status)
+
+    an = sub.add_parser(
+        "analyze",
+        help="token stats, truncation and leakage checks, and a dataset card",
+    )
+    an.add_argument("--max-seq-len", type=int, default=2048,
+                    help="sequence length you plan to train at (default 2048)")
+    an.add_argument("--json", action="store_true", help="also write exports/analysis.json")
+    an.add_argument("--no-card", action="store_true", help="skip DATASET_CARD.md")
+    an.add_argument("--strict", action="store_true",
+                    help="exit non-zero if any warning fires (for CI)")
+    an.set_defaults(fn=cmd_analyze)
 
     n = sub.add_parser("inspect", help="print sample records")
     n.add_argument("-n", type=int, default=5, help="how many to show")
