@@ -89,10 +89,16 @@ min_question_chars = 12
 # -----------------------------------------------------------------------------
 
 # Local documents: PDFs, DOCX, PPTX, XLSX, MD, TXT, HTML, CSV, JSON, code.
+# DROP YOUR FILES IN `corpus/docs/` — subfolders are walked too, so you can
+# organise them however you like. Anything matching a glob below is picked up
+# on the next `datagen build`.
 [[sources.files]]
 name    = "local-docs"
 path    = "corpus/docs"
-globs   = ["**/*.pdf", "**/*.docx", "**/*.pptx", "**/*.md", "**/*.txt", "**/*.html"]
+globs   = [
+  "**/*.pdf", "**/*.docx", "**/*.pptx", "**/*.xlsx",
+  "**/*.md", "**/*.txt", "**/*.html", "**/*.csv", "**/*.json",
+]
 tags    = ["docs"]
 
 # Runbooks get their own connector: procedures are parsed step-wise so the
@@ -100,7 +106,7 @@ tags    = ["docs"]
 [[sources.runbooks]]
 name    = "ops-runbooks"
 path    = "corpus/runbooks"
-globs   = ["**/*.md", "**/*.txt", "**/*.pdf"]
+globs   = ["**/*.md", "**/*.txt", "**/*.pdf", "**/*.docx"]
 tags    = ["runbook", "ops"]
 
 # Confluence. Credentials come from the environment, never from this file:
