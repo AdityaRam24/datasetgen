@@ -133,8 +133,8 @@ tags       = ["web", "vendor-docs"]
 # what is worth scraping. Add a keyword and re-run — it expands on its own.
 [sources.keywords]
 enabled  = true
-engine   = "duckduckgo"          # duckduckgo | searxng
-searxng_url = "http://localhost:8888"
+engine   = "searxng"          # searxng | duckduckgo — see searxng/setup.py
+searxng_url = "http://localhost:8888"   # falls back to DuckDuckGo if unreachable
 results_per_keyword = 8
 max_pages_per_keyword = 10
 terms = [

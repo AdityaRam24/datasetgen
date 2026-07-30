@@ -6,6 +6,8 @@
     python -m datagen agent               let the agent decide what to do
     python -m datagen scrape "<keyword>"  scrape the web for one keyword
     python -m datagen ingest <path>       ingest a file or folder
+    python -m datagen learn "<text>"      teach it from your own input
+    python -m datagen learn -q "…" -a "…" add a Q&A pair you wrote yourself
     python -m datagen confluence          pull the configured Confluence spaces
     python -m datagen watch               run forever, updating itself
     python -m datagen export              re-export from what is already on disk
@@ -24,7 +26,7 @@ from . import __version__
 from .config import Config, load_config
 from .llm import LocalLLM
 from .state import StateStore
-from .util import get_logger, setup_logging, truncate
+from .util import force_utf8_output, get_logger, setup_logging, truncate
 
 log = get_logger("cli")
 
@@ -94,7 +96,19 @@ def cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
         elif type_ == "web":
             detail = f"{len(block.get('seeds', []))} seeds, max {block.get('max_pages')} pages"
         elif type_ == "keywords":
-            detail = f"{len(block.get('terms', []))} terms via {block.get('engine')}"
+            engine = block.get("engine", "duckduckgo")
+            detail = f"{len(block.get('terms', []))} terms via {engine}"
+            if engine == "searxng":
+                from .connectors.search import searxng_available
+
+                url = block.get("searxng_url", "")
+                if searxng_available(url):
+                    detail += f" @ {url} (up)"
+                else:
+                    detail += (
+                        f" @ {url} — NOT RUNNING, will fall back to DuckDuckGo. "
+                        "Start it: python searxng/setup.py"
+                    )
         elif type_ == "confluence":
             client = ConfluenceClient(block.get("base_url", ""))
             detail = (
@@ -239,6 +253,79 @@ def cmd_ingest(args: argparse.Namespace, cfg: Config) -> int:
         return 0
     _generate_and_persist(cfg, llm, docs)
     return 0
+
+
+def cmd_learn(args: argparse.Namespace, cfg: Config) -> int:
+    """Fold input you provide into the dataset and knowledge base."""
+    from .exporters import export_all
+    from .learn import (
+        case_record, collect_input, pair_record, read_interactive, read_stdin,
+    )
+    from .pipeline import Pipeline
+
+    llm = LocalLLM(cfg.llm)
+    _banner(cfg, llm)
+    cfg.ensure_dirs()
+    tags = args.tags or []
+
+    # --- a pair or case you authored: trusted, stored verbatim --------------
+    if args.answer or args.resolution:
+        if args.resolution:
+            problem = args.problem or args.text or read_stdin() or read_interactive()
+            if not problem.strip():
+                print("  --resolution needs a problem: pass --problem or pipe it in")
+                return 1
+            rec = case_record(problem, args.resolution, tags=tags)
+        else:
+            question = args.question or args.text
+            if not question:
+                print("  --answer needs a --question")
+                return 1
+            rec = pair_record(question, args.answer, kind=args.kind_pair, tags=tags)
+
+        with StateStore(cfg.state_db) as state:
+            pipeline = Pipeline(cfg, state, llm)
+            chunk = _chunk_from_record(rec)
+            all_records = pipeline.persist([chunk], [rec], [])
+            export_all(cfg, all_records, None)
+        print(f"\n  learned 1 {rec.kind} record (human-authored, not judged)")
+        print(f"  Q: {truncate(rec.instruction, 100)}")
+        print(f"  A: {truncate(rec.output, 100)}\n")
+        return 0
+
+    # --- raw material: generate from it like any other source ---------------
+    text = args.text or ""
+    if not text and not args.file and not args.url:
+        text = read_stdin() or read_interactive()
+
+    docs = collect_input(
+        cfg, text=text, files=args.file or [], urls=args.url or [],
+        kind=args.kind, title=args.title or "", tags=tags,
+    )
+    if not docs:
+        print("\n  nothing to learn from — give me text, --file, --url, or pipe input in\n")
+        return 1
+
+    print(f"\n  learning from {len(docs)} input(s):")
+    for d in docs:
+        print(f"    - {truncate(d.title, 60):62} {len(d.text):>7} chars  [{d.kind}]")
+
+    _generate_and_persist(cfg, llm, docs)
+    return 0
+
+
+def _chunk_from_record(rec):
+    """Rebuild the chunk a human-authored record refers to, so it is persisted
+    alongside the record and reaches the RAG export and the Kalam KB."""
+    from .models import Chunk, Document
+
+    doc = Document.make(
+        title=rec.source_title, url=rec.source_url, text=rec.context,
+        kind=rec.kind, source="human", tags=rec.tags,
+    )
+    chunk = Chunk.make(doc, rec.context, 0)
+    chunk.id = rec.chunk_id      # keep the record's foreign key valid
+    return chunk
 
 
 def cmd_confluence(args: argparse.Namespace, cfg: Config) -> int:
@@ -409,6 +496,36 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--no-generate", action="store_true")
     i.set_defaults(fn=cmd_ingest)
 
+    lr = sub.add_parser(
+        "learn",
+        help="teach it from your own input: text, files, URLs or a Q&A pair",
+        description="Fold input you provide into the dataset and knowledge base.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  datagen learn "MLIS endpoints hold their GPU until scaled to zero."
+  datagen learn --file incident-2026-07.md --kind runbook
+  kubectl logs pod-x | datagen learn --title "MLIS crash log" --kind log
+  datagen learn --url https://docs.example.com/page
+  datagen learn --question "How do I free a GPU?" --answer "Scale to zero replicas."
+  datagen learn --problem "endpoint 503 after upgrade" --resolution "bucket creds expired; recreate the secret"
+  datagen learn                      # interactive paste
+""",
+    )
+    lr.add_argument("text", nargs="?", help="the text to learn from")
+    lr.add_argument("--file", "-f", nargs="+", help="file(s) or folder(s) to learn from")
+    lr.add_argument("--url", "-u", nargs="+", help="URL(s) to fetch and learn from")
+    lr.add_argument("--title", help="title for the input")
+    lr.add_argument("--kind", default="note",
+                    help="note | runbook | log | doc (runbook parses steps structurally)")
+    lr.add_argument("--tags", nargs="+", help="tags to attach to every record")
+    lr.add_argument("--question", "-q", help="a question you are answering yourself")
+    lr.add_argument("--answer", "-a", help="the answer — stored verbatim, not judged")
+    lr.add_argument("--kind-pair", default="qa",
+                    help="kind for a --question/--answer pair (default: qa)")
+    lr.add_argument("--problem", help="a problem you hit (use with --resolution)")
+    lr.add_argument("--resolution", help="how you fixed it — stored as a troubleshooting case")
+    lr.set_defaults(fn=cmd_learn)
+
     c = sub.add_parser("confluence", help="pull Confluence spaces")
     c.add_argument("--space", nargs="+", help="space keys (defaults to config.toml)")
     c.add_argument("--limit", type=int, default=100)
@@ -435,6 +552,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Before parse_args: `--help` prints and exits during parsing, and on a
+    # cp1252 Windows console the em-dashes in the help text would crash it.
+    force_utf8_output()
     args = build_parser().parse_args(argv)
     setup_logging(args.verbose, args.log_file)
     try:

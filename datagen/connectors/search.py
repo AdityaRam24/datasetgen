@@ -103,14 +103,31 @@ def _strip_tags(text: str) -> str:
 
 
 def search_searxng(query: str, base_url: str, limit: int = 10) -> list[SearchResult]:
+    """Query a local SearXNG instance's JSON API.
+
+    SearXNG aggregates Google/Bing/DDG/StackOverflow at once, so it gives
+    better coverage than any single engine and does not rate-limit you — but
+    only if `search.formats` includes `json` in its settings.yml. Without it
+    every request is a bare 403, which is why that case is called out here.
+    """
     try:
         data = http_request(
             f"{base_url.rstrip('/')}/search?q={quote_plus(query)}&format=json",
-            timeout=25,
+            timeout=30,
             retries=1,
         ).json()
-    except (HttpError, ValueError) as e:
-        log.warning("searxng search failed for %r: %s", query, e)
+    except HttpError as e:
+        if e.status == 403:
+            log.error(
+                "SearXNG returned 403 — its JSON API is disabled. Add `json` to "
+                "`search.formats` and set `server.limiter: false` in "
+                "searxng/settings.yml, then: python searxng/setup.py --restart"
+            )
+        else:
+            log.warning("searxng search failed for %r: %s", query, e)
+        return []
+    except ValueError as e:
+        log.warning("searxng returned invalid JSON for %r: %s", query, e)
         return []
 
     return [
@@ -125,12 +142,41 @@ def search_searxng(query: str, base_url: str, limit: int = 10) -> list[SearchRes
     ]
 
 
-def web_search(query: str, engine: str = "duckduckgo", searxng_url: str = "", limit: int = 10) -> list[SearchResult]:
-    results = (
-        search_searxng(query, searxng_url, limit)
-        if engine == "searxng" and searxng_url
-        else search_duckduckgo(query, limit)
-    )
+def searxng_available(base_url: str) -> bool:
+    if not base_url:
+        return False
+    try:
+        http_request(f"{base_url.rstrip('/')}/healthz", timeout=5, retries=0)
+        return True
+    except HttpError:
+        return False
+
+
+def web_search(
+    query: str, engine: str = "searxng", searxng_url: str = "", limit: int = 10
+) -> list[SearchResult]:
+    """Search, preferring the configured engine but never dead-ending.
+
+    SearXNG is the better source when it is up: it aggregates several engines
+    and is not scraping anyone's HTML. When the container is stopped we fall
+    back to DuckDuckGo rather than failing the run — a paused container should
+    not cost you a build.
+    """
+    results: list[SearchResult] = []
+
+    if engine == "searxng" and searxng_url:
+        results = search_searxng(query, searxng_url, limit)
+        if not results:
+            if not searxng_available(searxng_url):
+                log.warning(
+                    "SearXNG at %s is not reachable — falling back to DuckDuckGo. "
+                    "Start it with: python searxng/setup.py",
+                    searxng_url,
+                )
+            results = search_duckduckgo(query, limit)
+    else:
+        results = search_duckduckgo(query, limit)
+
     return rank_results(results, query)
 
 

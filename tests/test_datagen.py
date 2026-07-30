@@ -17,13 +17,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from datagen.chunking import chunk_document                      # noqa: E402
 from datagen.config import ChunkingConfig, LLMConfig, QualityConfig, load_config  # noqa: E402
+from datagen.connectors.files import read_file                    # noqa: E402
 from datagen.connectors.parsers import parse_html, _postprocess_pdf  # noqa: E402
 from datagen.connectors.runbooks import normalize, parse_runbook  # noqa: E402
 from datagen.dedupe import Deduper, hamming, simhash             # noqa: E402
 from datagen.exporters import (                                   # noqa: E402
     build_glossary, glossary_markdown, split_by_document, to_alpaca, to_chatml,
 )
+from datagen.connectors.search import (                           # noqa: E402
+    SearchResult, rank_results, searxng_available,
+)
 from datagen.generators import _extractive_glossary, is_useful_term  # noqa: E402
+from datagen.learn import case_record, document_from_text, pair_record  # noqa: E402
 from datagen.models import Chunk, Document, Record               # noqa: E402
 from datagen.quality import grounding_score, heuristic_check     # noqa: E402
 from datagen.state import StateStore, _to_signed64, _to_unsigned64  # noqa: E402
@@ -385,6 +390,101 @@ class TestGlossary(unittest.TestCase):
         chunk = Chunk.make(make_doc(body), body, 0)
         terms = {(r.meta or {}).get("term") for r in _extractive_glossary(chunk, body)}
         self.assertNotIn("GPU", terms)
+
+
+class TestLearn(unittest.TestCase):
+    def test_text_becomes_a_document_with_input_provenance(self):
+        doc = document_from_text(
+            "MLIS endpoints hold their GPU allocation until scaled to zero replicas, "
+            "which is the usual cause of capacity errors.",
+            tags=["gpu"],
+        )
+        self.assertIsNotNone(doc)
+        self.assertTrue(doc.url.startswith("input://"))
+        self.assertIn("user-input", doc.tags)
+        self.assertIn("gpu", doc.tags)
+
+    def test_title_is_derived_from_the_first_line(self):
+        doc = document_from_text("# GPU scheduling notes\n\n" + "Body text here. " * 8)
+        self.assertEqual(doc.title, "GPU scheduling notes")
+
+    def test_trivially_short_input_is_refused(self):
+        self.assertIsNone(document_from_text("too short"))
+
+    def test_human_pair_is_trusted_and_traceable(self):
+        rec = pair_record("How do I free a GPU?", "Scale the endpoint to zero replicas.",
+                          tags=["ops"])
+        self.assertEqual(rec.score, 1.0)
+        self.assertEqual(rec.generator, "human:input")
+        self.assertTrue(rec.source_url.startswith("human://"))
+        self.assertIn("human-authored", rec.tags)
+        self.assertIn("ops", rec.tags)
+        self.assertFalse(rec.quarantined)
+
+    def test_human_pair_survives_the_quality_gate_untouched(self):
+        # The gate must never quarantine a human correction for being
+        # "ungrounded" — there is no source chunk to be grounded against.
+        rec = pair_record(
+            "How do I free a GPU allocation?",
+            "Scale the idle endpoint to zero replicas; the GPU is released immediately.",
+        )
+        verdict = heuristic_check(rec, QualityConfig())
+        self.assertTrue(verdict.ok, verdict.reason)
+
+    def test_solved_case_becomes_a_troubleshooting_record(self):
+        rec = case_record("endpoint 503 after upgrade", "bucket credentials expired; recreate the secret")
+        self.assertEqual(rec.kind, "troubleshooting")
+        self.assertIn("503 after upgrade", rec.instruction)
+        self.assertIn("solved-case", rec.tags)
+
+    def test_relative_file_path_is_accepted(self):
+        # Regression: read_file called Path.as_uri(), which raises on a
+        # relative path, so `learn --file ./x.md` and `ingest ./docs` failed.
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "note.md"
+            path.write_text("# Notes\n\n" + "Real content about GPU scheduling. " * 6,
+                            encoding="utf-8")
+            cwd = os.getcwd()
+            try:
+                os.chdir(tmp)
+                doc = read_file(Path("note.md"), "test")
+            finally:
+                os.chdir(cwd)
+
+        self.assertIsNotNone(doc)
+        self.assertTrue(doc.url.startswith("file:///"))
+
+    def test_identical_input_produces_a_stable_id(self):
+        a = pair_record("How do I free a GPU?", "Scale to zero.")
+        b = pair_record("How do I free a GPU?", "Scale to zero.")
+        self.assertEqual(a.id, b.id)   # re-learning the same thing is idempotent
+
+
+class TestSearch(unittest.TestCase):
+    def test_ranking_prefers_primary_docs_and_drops_junk(self):
+        results = [
+            SearchResult("https://pinterest.com/pin/1", "MLIS pin", "", 0),
+            SearchResult("https://randomblog.dev/post", "Some MLIS post", "mlis endpoint", 1),
+            SearchResult("https://docs.example.com/mlis/endpoints",
+                         "MLIS endpoints", "mlis endpoint troubleshooting", 2),
+        ]
+        ranked = rank_results(results, "mlis endpoint troubleshooting")
+        self.assertEqual(len(ranked), 2)                       # pinterest dropped
+        self.assertIn("docs.example.com", ranked[0].url)       # primary docs first
+
+    def test_ranking_penalises_archive_pages(self):
+        ranked = rank_results([
+            SearchResult("https://docs.example.com/guide/mlis", "MLIS guide", "mlis", 0),
+            SearchResult("https://docs.example.com/tag/12", "Tag page", "mlis", 0),
+        ], "mlis")
+        self.assertIn("/guide/", ranked[0].url)
+
+    def test_searxng_unreachable_is_reported_not_raised(self):
+        # A stopped container must degrade, never abort a run.
+        self.assertFalse(searxng_available("http://127.0.0.1:9"))
+        self.assertFalse(searxng_available(""))
 
 
 class TestLLMConfig(unittest.TestCase):

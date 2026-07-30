@@ -1,23 +1,25 @@
 {
   "dataset": "pcai-dataset",
-  "generated_at": "2026-07-30T10:29:34Z",
+  "generated_at": "2026-07-30T18:39:02Z",
   "generated_by": "local model qwen2.5-coder:7b via ollama (http://localhost:11434)",
-  "records": 18,
-  "train": 15,
+  "records": 22,
+  "train": 19,
   "eval": 3,
-  "chunks": 8,
+  "chunks": 11,
   "glossary_terms": 5,
-  "kalam_kb_docs": 8,
+  "kalam_kb_docs": 12,
   "kinds": {
-    "instruction": 7,
-    "qa": 6,
-    "glossary": 5
+    "qa": 8,
+    "instruction": 8,
+    "glossary": 5,
+    "troubleshooting": 1
   },
   "sources": {
     "source:local-docs": 15,
-    "source:ops-runbooks": 3
+    "source:ops-runbooks": 3,
+    "source:input": 2
   },
-  "mean_score": 0.953,
+  "mean_score": 0.948,
   "files": [
     "dataset.jsonl",
     "train.jsonl",

@@ -40,6 +40,10 @@ def iter_files(root: Path, globs: list[str]) -> list[Path]:
 
 def read_file(path: Path, source: str, tags: list[str] | None = None) -> Document | None:
     """Parse one file into a Document, or None if it is unreadable/empty."""
+    # as_uri() below requires an absolute path. The connector's own globbing
+    # always produces one, but `datagen learn --file ./notes.md` and
+    # `datagen ingest ./docs` hand us whatever the user typed.
+    path = path.expanduser().resolve()
     kind = EXTENSION_MAP.get(path.suffix.lower())
     if kind is None:
         log.debug("skipping unsupported file type: %s", path.name)

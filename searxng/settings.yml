@@ -1,0 +1,70 @@
+# SearXNG configuration for the dataset generator.
+#
+# `use_default_settings: true` merges this on top of the image's defaults, so
+# only the overrides that matter are listed here.
+#
+# THE CRITICAL SETTING is `search.formats` — SearXNG ships with only `html`
+# enabled, and the JSON API returns HTTP 403 without a word of explanation.
+# Every "searxng returns nothing" report traces back to this.
+
+use_default_settings: true
+
+general:
+  instance_name: "datagen"
+  # This is a private instance for one tool; no public-facing chrome.
+  donation_url: false
+  contact_url: false
+  enable_metrics: false
+
+server:
+  # Replaced with a random value by `python searxng/setup.py`.
+  secret_key: "CHANGE_ME_RUN_SETUP"
+  # The limiter is bot protection. It blocks our own API calls, and this
+  # instance is bound to localhost, so it is off deliberately.
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: "GET"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  # Without "json" here, the dataset generator gets 403 on every query.
+  formats:
+    - html
+    - json
+
+outgoing:
+  # Upstream engines are slow more often than they are broken; be patient
+  # rather than dropping results.
+  request_timeout: 8.0
+  max_request_timeout: 15.0
+  pool_connections: 100
+  pool_maxsize: 20
+
+ui:
+  static_use_hash: true
+
+engines:
+  # Engines that reliably surface primary technical documentation.
+  - name: google
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: github
+    disabled: false
+  - name: stackoverflow
+    disabled: false
+  - name: arxiv
+    disabled: false
+
+  # Noise for a technical corpus — disabled so they never reach the ranker.
+  - name: pinterest
+    disabled: true
+  - name: 9gag
+    disabled: true

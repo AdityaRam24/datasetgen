@@ -25,15 +25,21 @@ pip install -r requirements.txt
 ollama serve
 ollama pull nomic-embed-text        # for semantic dedupe
 
-# 2. Check everything before you spend GPU time on it
+# 2. Start the local search engine (optional; falls back to DuckDuckGo)
+python searxng/setup.py
+
+# 3. Check everything before you spend GPU time on it
 python -m datagen doctor
 
-# 3. Build from the sample corpus that ships with the repo
+# 4. Build from the sample corpus that ships with the repo
 python -m datagen build
 
-# 4. Look at what it produced
+# 5. Look at what it produced
 python -m datagen inspect -n 5
 python -m datagen status
+
+# 6. Teach it something of your own
+python -m datagen learn -q "How do I free a GPU?" -a "Scale the endpoint to zero replicas."
 ```
 
 Output lands in `exports/` — `train.jsonl`, `eval.jsonl`, plus alpaca/sharegpt/chatml
@@ -73,11 +79,79 @@ that have not changed and only regenerates what actually moved.
 | `agent` | The agent plans its own sequence of tool calls toward the objective in `config.toml` |
 | `scrape "<keyword>"` | Search the web for one keyword and ingest the best results |
 | `ingest <path>` | Ingest a file or folder. `--runbook` parses procedures structurally |
+| `learn` | Teach it from **your own input** — text, files, URLs, or a Q&A pair you wrote |
 | `confluence` | Pull the configured spaces (`--space OPS PCAI --attachments`) |
 | `watch` | Run forever, updating itself. `--once` for a single cycle |
 | `export` | Re-export from `data/` without regenerating anything |
 | `status` | Totals, run history, and the leads queued for next time |
 | `inspect` | Print sample records. `--rejected` shows what the quality gate threw out |
+
+---
+
+## Teaching it yourself — `datagen learn`
+
+Everything else goes out and finds material. `learn` takes material **you** hand it and
+folds it into the same dataset, knowledge base and exports.
+
+```bash
+# raw material — chunked, generated and quality-gated like any other source
+datagen learn "MLIS endpoints hold their GPU allocation until scaled to zero."
+datagen learn --file incident-2026-07.md --kind runbook
+datagen learn --url https://docs.example.com/some-page
+kubectl logs mlis-pod-x | datagen learn --title "MLIS crash log" --kind log
+datagen learn                       # interactive paste, Ctrl-Z (Win) / Ctrl-D
+
+# things YOU know — stored verbatim, never paraphrased
+datagen learn -q "How do I free a GPU?" -a "Scale the endpoint to zero replicas."
+datagen learn --problem "endpoint 503 after upgrade" \
+              --resolution "Bucket credentials expired. Delete the secret and reconnect."
+```
+
+The two halves behave differently on purpose:
+
+| Input | Path |
+|---|---|
+| text / file / URL / stdin | Normal pipeline: chunk → dedupe → local model generates → quality gate |
+| `--question` + `--answer`, `--problem` + `--resolution` | **Bypasses generation and the quality gate.** Stored exactly as written, `score = 1.0`, `generator = human:input` |
+
+That bypass is deliberate. The quality gate exists to catch a 7B model inventing things;
+running it against a human correction would be backwards — its grounding check would
+reject a *true* answer purely because you didn't paste the source you got it from.
+
+Human rows are traceable forever: they carry a `human://` URL and a `human-authored` tag,
+so you can always separate what a person asserted from what a model synthesised:
+
+```bash
+python -c "import json;[print(r['kind'],r['source_url']) for r in map(json.loads,open('data/records.jsonl',encoding='utf-8')) if r['generator'].startswith('human')]"
+```
+
+Re-learning the same pair is idempotent — record IDs are content-derived, so it updates
+rather than duplicating.
+
+---
+
+## Search: local SearXNG
+
+The keyword/discovery path defaults to a **local SearXNG** container. It aggregates
+Google, Bing, Brave, DuckDuckGo and StackOverflow in one query, isn't scraping anyone's
+HTML, and won't rate-limit you.
+
+```bash
+python searxng/setup.py            # start + verify (idempotent)
+python searxng/setup.py --check    # verify only
+python searxng/setup.py --logs
+python searxng/setup.py --stop
+```
+
+The script generates the instance secret, brings up the container, waits for health, and
+then **proves the JSON API answers**. That last step matters: SearXNG ships with
+`search.formats` set to `html` only, so the JSON API returns a bare `403` with no
+explanation. `searxng/settings.yml` enables `json` and disables the bot limiter (the
+instance is bound to `127.0.0.1` only). On this machine it returned 40 results across
+four engines where DuckDuckGo alone returned 6.
+
+**If the container is down, the run does not fail** — `web_search()` falls back to
+DuckDuckGo and logs how to start SearXNG. `datagen doctor` shows its status either way.
 
 ---
 
@@ -155,9 +229,11 @@ CONFLUENCE_TOKEN=...
 robots.txt, per-host delay, and hard caps on pages/depth/size. Linked PDFs are parsed,
 not skipped.
 
-**`[sources.keywords]`** — the "find everything about X" path. Searches DuckDuckGo's
-no-JS endpoint (or your own SearXNG), ranks results — vendor docs and `docs.*` hosts up,
-Pinterest/Quora and tag-archive pages out — then scrapes the winners.
+**`[sources.keywords]`** — the "find everything about X" path. Queries your local SearXNG
+(falling back to DuckDuckGo's no-JS endpoint), ranks results — vendor docs and `docs.*`
+hosts up, Pinterest/Quora and tag-archive pages out — then scrapes the winners.
+
+**`datagen learn`** — anything you hand it directly. See above.
 
 ---
 
@@ -268,9 +344,11 @@ dataset-generation/
 ├── corpus/                  your documents go here
 ├── data/                    state.db, records.jsonl, quarantine.jsonl
 ├── exports/                 the dataset
-├── tests/test_datagen.py    31 tests, no network, no LLM
+├── searxng/                 local search: compose file, settings, setup script
+├── tests/test_datagen.py    50 tests, no network, no LLM
 └── datagen/
     ├── __main__.py          CLI
+    ├── learn.py             input you provide -> dataset records
     ├── config.py            TOML + env, local-address guard
     ├── llm.py               Ollama / OpenAI-compatible client
     ├── state.py             SQLite: hashes, records, leads, run history
