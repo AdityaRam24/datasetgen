@@ -24,13 +24,32 @@ from .util import clean_text, get_logger, truncate
 
 log = get_logger("generators")
 
-SYSTEM = (
-    "You are a meticulous technical dataset author. You write training examples "
-    "for an assistant that supports HPE Private Cloud AI and general platform "
-    "operations. You never invent facts: every answer must be fully supported by "
-    "the SOURCE text you are given. If the source does not answer something, you "
-    "do not write that example. You always reply with valid JSON and nothing else."
+_SYSTEM_BASE = (
+    "You are a meticulous technical dataset author.{domain} You never invent "
+    "facts: every answer must be fully supported by the SOURCE text you are "
+    "given. If the source does not answer something, you do not write that "
+    "example. You always reply with valid JSON and nothing else."
 )
+
+
+def system_prompt(cfg: Config | None = None) -> str:
+    """Build the author persona for the current dataset.
+
+    The subject matter comes from `[project] description` in config.toml rather
+    than being baked in, so the same generator produces good examples whatever
+    you point it at — feed it Postgres docs, a legal handbook or your own notes
+    via `datagen learn` and the prompt follows.
+    """
+    domain = ""
+    if cfg:
+        subject = (cfg.description or cfg.name or "").strip()
+        if subject:
+            domain = f" You are writing training examples for an assistant about: {subject}."
+    return _SYSTEM_BASE.format(domain=domain)
+
+
+# Used only where no config is in scope (direct calls, tests).
+SYSTEM = system_prompt()
 
 _QA_PROMPT = """Read the SOURCE below and write {n} question/answer pairs.
 
@@ -120,40 +139,40 @@ SOURCE:
 # ---------------------------------------------------------------------------
 
 
-def _gen_qa(chunk: Chunk, llm: LocalLLM, n: int) -> list[Record]:
+def _gen_qa(chunk: Chunk, llm: LocalLLM, n: int, system: str = SYSTEM) -> list[Record]:
     data = llm.complete_json(
         _QA_PROMPT.format(n=n, title=chunk.title, text=truncate(chunk.text, 6000)),
-        system=SYSTEM,
+        system=system,
     )
     return _pairs_to_records(data, chunk, "qa", ("question", "answer"), llm.cfg.model, "pairs")
 
 
-def _gen_instruction(chunk: Chunk, llm: LocalLLM, n: int) -> list[Record]:
+def _gen_instruction(chunk: Chunk, llm: LocalLLM, n: int, system: str = SYSTEM) -> list[Record]:
     data = llm.complete_json(
         _INSTRUCTION_PROMPT.format(n=n, title=chunk.title, text=truncate(chunk.text, 6000)),
-        system=SYSTEM,
+        system=system,
     )
     return _pairs_to_records(
         data, chunk, "instruction", ("instruction", "response"), llm.cfg.model, "pairs"
     )
 
 
-def _gen_troubleshooting(chunk: Chunk, llm: LocalLLM, n: int) -> list[Record]:
+def _gen_troubleshooting(chunk: Chunk, llm: LocalLLM, n: int, system: str = SYSTEM) -> list[Record]:
     data = llm.complete_json(
         _TROUBLESHOOT_PROMPT.format(
             n=max(1, n - 1), title=chunk.title, text=truncate(chunk.text, 6000)
         ),
-        system=SYSTEM,
+        system=system,
     )
     return _pairs_to_records(
         data, chunk, "troubleshooting", ("symptom", "answer"), llm.cfg.model, "cases"
     )
 
 
-def _gen_glossary(chunk: Chunk, llm: LocalLLM, n: int) -> list[Record] | None:
+def _gen_glossary(chunk: Chunk, llm: LocalLLM, n: int, system: str = SYSTEM) -> list[Record] | None:
     data = llm.complete_json(
         _GLOSSARY_PROMPT.format(title=chunk.title, text=truncate(chunk.text, 6000)),
-        system=SYSTEM,
+        system=system,
     )
     if data is None:
         return None
@@ -373,7 +392,7 @@ def _extractive_glossary(chunk: Chunk, body: str) -> list[Record]:
     return out
 
 
-GENERATORS: dict[str, Callable[[Chunk, LocalLLM, int], list[Record] | None]] = {
+GENERATORS: dict[str, Callable[[Chunk, LocalLLM, int, str], list[Record] | None]] = {
     "qa": _gen_qa,
     "instruction": _gen_instruction,
     "troubleshooting": _gen_troubleshooting,
@@ -407,7 +426,11 @@ def generate_for_chunk(
     llm_worked = False
 
     for kind in kinds:
-        result = GENERATORS[kind](chunk, llm, per_kind) if llm.available() else None
+        result = (
+            GENERATORS[kind](chunk, llm, per_kind, system_prompt(cfg))
+            if llm.available()
+            else None
+        )
         if result is None:
             continue                       # LLM unavailable or call failed
         llm_worked = True

@@ -1,8 +1,8 @@
 # Glossary — Training/RAG dataset for the Kalam PCAI assistant
 
-5 terms, generated 2026-07-30T18:39:02Z by the local model `qwen2.5-coder:7b`. Every definition is drawn from the sources cited beneath it — nothing here is the model's own knowledge.
+7 terms, generated 2026-07-30T19:08:14Z by the local model `qwen2.5-coder:7b`. Every definition is drawn from the sources cited beneath it — nothing here is the model's own knowledge.
 
-[A](#a)  [G](#g)  [I](#i)  [M](#m)
+[A](#a)  [G](#g)  [I](#i)  [M](#m)  [S](#s)  [T](#t)
 
 ## A
 
@@ -45,3 +45,19 @@ MLDM is a service that manages data pipelines for machine learning workflows.
 *Also known as: data pipelines*
 
 <sub>Sources: [pcai architecture notes](file:///C:/Users/Steve/Desktop/kalam/dataset-generation/corpus/docs/pcai-architecture-notes.md)</sub>
+
+## S
+
+### statement
+
+In PgBouncer, statement pooling mode forbids multi-statement transactions entirely.
+
+<sub>Sources: [PgBouncer pooling modes](input://note/pgbouncer-pooling-modes-c2109cb2)</sub>
+
+## T
+
+### transaction
+
+In PgBouncer, transaction pooling mode returns the server connection to the pool at commit, allowing a small pool to serve many clients.
+
+<sub>Sources: [PgBouncer pooling modes](input://note/pgbouncer-pooling-modes-c2109cb2)</sub>

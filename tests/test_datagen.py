@@ -27,7 +27,9 @@ from datagen.exporters import (                                   # noqa: E402
 from datagen.connectors.search import (                           # noqa: E402
     SearchResult, rank_results, searxng_available,
 )
-from datagen.generators import _extractive_glossary, is_useful_term  # noqa: E402
+from datagen.generators import (                                  # noqa: E402
+    _extractive_glossary, is_useful_term, system_prompt,
+)
 from datagen.learn import case_record, document_from_text, pair_record  # noqa: E402
 from datagen.models import Chunk, Document, Record               # noqa: E402
 from datagen.quality import grounding_score, heuristic_check     # noqa: E402
@@ -327,6 +329,15 @@ class TestGlossary(unittest.TestCase):
                           meta={"term": term, "aliases": aliases or []})
         rec.score = score
         return rec
+
+    def test_system_prompt_follows_the_configured_subject(self):
+        cfg = load_config()
+        cfg.description = "PostgreSQL administration and performance tuning"
+        prompt = system_prompt(cfg)
+        self.assertIn("PostgreSQL administration", prompt)
+        self.assertIn("never invent facts", prompt)
+        # No config: the persona still works, just without a subject line.
+        self.assertNotIn("assistant about:", system_prompt())
 
     def test_useful_term_filter(self):
         for good in ("MLIS", "CrashLoopBackOff", "control plane", "nvidia.com/gpu"):
