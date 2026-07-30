@@ -42,6 +42,9 @@ python -m datagen status
 python -m datagen learn -q "How do I free a GPU?" -a "Scale the endpoint to zero replicas."
 ```
 
+Prefer clicking to typing? `python -m datagen serve` opens a local web UI that does all
+of the above.
+
 Output lands in `exports/` — `train.jsonl`, `eval.jsonl`, plus alpaca/sharegpt/chatml
 variants and `rag_chunks.jsonl`.
 
@@ -74,6 +77,7 @@ that have not changed and only regenerates what actually moved.
 
 | Command | What it does |
 |---|---|
+| `serve` | **Web UI** — upload documents, manage keywords, run builds, browse records |
 | `doctor` | Checks the local model, which parsers are active, whether each source resolves |
 | `build` | One pass over every configured source. `--full` ignores caches, `--only files runbooks` narrows it, `--limit 20` caps chunks for a quick test |
 | `agent` | The agent plans its own sequence of tool calls toward the objective in `config.toml` |
@@ -86,6 +90,45 @@ that have not changed and only regenerates what actually moved.
 | `analyze` | **Is this trainable?** Token stats, truncation, leakage, dataset card |
 | `status` | Totals, run history, and the leads queued for next time |
 | `inspect` | Print sample records. `--rejected` shows what the quality gate threw out |
+
+---
+
+## Web UI — `datagen serve`
+
+```bash
+python -m datagen serve          # opens http://127.0.0.1:8800
+```
+
+Eight tabs covering everything you'd otherwise do on the command line:
+
+| Tab | |
+|---|---|
+| **Overview** | Record/chunk/document counts, corpus contents, recent runs |
+| **Upload** | Drag-and-drop documents into `corpus/docs` or `corpus/runbooks` |
+| **Keywords** | Edit the keyword list (written straight into `config.toml`), try one before committing it, and set the dataset subject |
+| **Run** | Build / full rebuild / agent / re-export, with a live log |
+| **Browse** | Read the actual records, filter by kind, search, or view what the quality gate rejected |
+| **Teach** | Add a Q&A pair, a solved case, or paste raw notes |
+| **Analyze** | Token stats, truncation and leakage checks |
+| **Exports** | List and download every generated file |
+
+It's the same stack as everything else — **stdlib only**, no Flask, no CDN, no
+build step. The page is one self-contained HTML file.
+
+**It is bound to `127.0.0.1` deliberately.** This UI writes files into your corpus and
+starts jobs, so it is not something to expose. There is no authentication, because there
+is nothing to authenticate to on a loopback interface. If you pass `--host 0.0.0.0` you
+are handing anyone on your network the ability to write files and run jobs on your
+machine — don't, unless you have put your own authentication in front of it.
+
+Within those bounds it is defensive about input: uploads are extension-allowlisted,
+size-capped at 80 MB, and path-checked against the corpus directory (a `../../../` in a
+filename is stripped, not honoured); downloads cannot escape the exports directory; and
+no endpoint builds a shell command, so there is nothing to inject into. Those paths are
+covered by tests.
+
+One job runs at a time — the local model is a single resource, and two concurrent builds
+would fight over it and over the SQLite state.
 
 ---
 
@@ -397,11 +440,12 @@ dataset-generation/
 ├── data/                    state.db, records.jsonl, quarantine.jsonl
 ├── exports/                 the dataset
 ├── searxng/                 local search: compose file, settings, setup script
-├── tests/test_datagen.py    63 tests, no network, no LLM
+├── tests/test_datagen.py    73 tests, no network, no LLM
 └── datagen/
     ├── __main__.py          CLI
     ├── learn.py             input you provide -> dataset records
     ├── analyze.py           trainability report + dataset card
+    ├── web.py + webui/       local control panel (stdlib http.server)
     ├── config.py            TOML + env, local-address guard
     ├── llm.py               Ollama / OpenAI-compatible client
     ├── state.py             SQLite: hashes, records, leads, run history

@@ -37,6 +37,9 @@ from datagen.learn import case_record, document_from_text, pair_record  # noqa: 
 from datagen.models import Chunk, Document, Record               # noqa: E402
 from datagen.quality import grounding_score, heuristic_check     # noqa: E402
 from datagen.state import StateStore, _to_signed64, _to_unsigned64  # noqa: E402
+from datagen.web import (                                         # noqa: E402
+    safe_upload_path, update_keywords, update_project,
+)
 from datagen.util import (                                        # noqa: E402
     clean_text, estimate_tokens, extract_json, tokenize,
 )
@@ -598,6 +601,97 @@ class TestAnalyze(unittest.TestCase):
         rep = analyze([], load_config())
         self.assertEqual(rep.total, 0)
         self.assertTrue(rep.warnings)
+
+
+class TestWebUI(unittest.TestCase):
+    """The upload and config-rewrite paths take untrusted input from a browser."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.dir.name)
+        (self.root / "docs").mkdir()
+        (self.root / "runbooks").mkdir()
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_normal_upload_resolves_inside_the_corpus(self):
+        p = safe_upload_path(self.root, "docs", "manual.pdf")
+        self.assertTrue(str(p).startswith(str(self.root.resolve())))
+        self.assertEqual(p.name, "manual.pdf")
+
+    def test_path_traversal_is_stripped(self):
+        for evil in ("../../../etc/passwd.txt", "..\\..\\windows\\system32\\x.txt",
+                     "sub/dir/notes.md", "/absolute/path/notes.md"):
+            p = safe_upload_path(self.root, "docs", evil)
+            self.assertTrue(str(p.resolve()).startswith(str(self.root.resolve())), evil)
+            self.assertNotIn("..", p.parts)
+
+    def test_unknown_extensions_are_refused(self):
+        for bad in ("payload.exe", "script.bat", "lib.dll", "noextension"):
+            with self.assertRaises(ValueError, msg=bad):
+                safe_upload_path(self.root, "docs", bad)
+
+    def test_only_known_folders_are_allowed(self):
+        with self.assertRaises(ValueError):
+            safe_upload_path(self.root, "../secrets", "a.pdf")
+        with self.assertRaises(ValueError):
+            safe_upload_path(self.root, "anything", "a.pdf")
+
+    def test_illegal_filename_characters_are_replaced(self):
+        p = safe_upload_path(self.root, "docs", 'we:ird*name?.pdf')
+        self.assertNotRegex(p.name, r'[<>:"|?*]')
+        self.assertTrue(p.name.endswith(".pdf"))
+
+    def test_keyword_rewrite_preserves_the_rest_of_the_file(self):
+        cfg_path = self.root / "config.toml"
+        cfg_path.write_text(
+            '[project]\nname = "x"\n\n'
+            '[sources.keywords]\nenabled = true\nengine = "searxng"\n'
+            'terms = [\n  "old one",\n]\n\n'
+            '[export]\nout_dir = "exports"\n',
+            encoding="utf-8",
+        )
+        self.assertTrue(update_keywords(cfg_path, ["new one", "another"]))
+
+        text = cfg_path.read_text(encoding="utf-8")
+        self.assertIn('"new one"', text)
+        self.assertIn('"another"', text)
+        self.assertNotIn("old one", text)
+        # Untouched neighbours
+        self.assertIn('engine = "searxng"', text)
+        self.assertIn('out_dir = "exports"', text)
+
+        import tomllib
+        parsed = tomllib.loads(text)          # must still be valid TOML
+        self.assertEqual(parsed["sources"]["keywords"]["terms"], ["new one", "another"])
+
+    def test_keyword_rewrite_handles_an_empty_list(self):
+        cfg_path = self.root / "config.toml"
+        cfg_path.write_text('[sources.keywords]\nterms = ["a"]\n', encoding="utf-8")
+        self.assertTrue(update_keywords(cfg_path, []))
+        import tomllib
+        self.assertEqual(tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+                         ["sources"]["keywords"]["terms"], [])
+
+    def test_keyword_rewrite_reports_failure_when_the_block_is_missing(self):
+        cfg_path = self.root / "config.toml"
+        cfg_path.write_text('[project]\nname = "x"\n', encoding="utf-8")
+        self.assertFalse(update_keywords(cfg_path, ["a"]))
+
+    def test_project_rewrite_updates_name_and_description(self):
+        cfg_path = self.root / "config.toml"
+        cfg_path.write_text('[project]\nname = "old"\ndescription = "old desc"\n',
+                            encoding="utf-8")
+        self.assertTrue(update_project(cfg_path, "new", "new desc"))
+        import tomllib
+        parsed = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["project"]["name"], "new")
+        self.assertEqual(parsed["project"]["description"], "new desc")
+
+    def test_ui_file_exists(self):
+        self.assertTrue((Path(__file__).resolve().parent.parent
+                         / "datagen" / "webui" / "index.html").is_file())
 
 
 class TestLLMConfig(unittest.TestCase):

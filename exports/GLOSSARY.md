@@ -1,6 +1,6 @@
 # Glossary — Training/RAG dataset for the Kalam PCAI assistant
 
-7 terms, generated 2026-07-30T19:18:03Z by the local model `qwen2.5-coder:7b`. Every definition is drawn from the sources cited beneath it — nothing here is the model's own knowledge.
+7 terms, generated 2026-07-30T20:19:56Z by the local model `qwen2.5-coder:7b`. Every definition is drawn from the sources cited beneath it — nothing here is the model's own knowledge.
 
 [A](#a)  [G](#g)  [I](#i)  [M](#m)  [S](#s)  [T](#t)
 

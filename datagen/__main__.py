@@ -1,5 +1,6 @@
 """Command line interface.
 
+    python -m datagen serve               web UI to manage everything
     python -m datagen doctor              check the local model and parsers
     python -m datagen build               one incremental build
     python -m datagen build --full        ignore caches, rebuild everything
@@ -418,6 +419,16 @@ def cmd_status(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace, cfg: Config) -> int:
+    """Local web UI for managing the dataset."""
+    from .web import serve
+
+    llm = LocalLLM(cfg.llm)
+    _banner(cfg, llm)
+    serve(cfg, host=args.host, port=args.port, open_browser=not args.no_browser)
+    return 0
+
+
 def cmd_analyze(args: argparse.Namespace, cfg: Config) -> int:
     """Is this dataset actually trainable? Report before you burn GPU hours."""
     from .analyze import analyze, dataset_card, load_records, report_text
@@ -570,6 +581,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("export", help="re-export from data/ without regenerating").set_defaults(fn=cmd_export)
     sub.add_parser("status", help="show what the dataset contains").set_defaults(fn=cmd_status)
+
+    sv = sub.add_parser("serve", help="open the web UI to manage everything")
+    sv.add_argument("--port", type=int, default=8800)
+    sv.add_argument("--host", default="127.0.0.1",
+                    help="bind address — leave as localhost unless you know why not")
+    sv.add_argument("--no-browser", action="store_true", help="do not open a browser")
+    sv.set_defaults(fn=cmd_serve)
 
     an = sub.add_parser(
         "analyze",

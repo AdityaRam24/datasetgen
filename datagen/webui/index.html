@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dataset Manager</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #161b22; --panel2: #1c232c; --line: #2a323d;
+    --fg: #e6edf3; --dim: #8b98a5; --accent: #4a9eff; --ok: #3fb950;
+    --warn: #d29922; --err: #f85149; --radius: 10px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f8fa; --panel: #fff; --panel2: #f0f3f6; --line: #d8dee4;
+      --fg: #1f2328; --dim: #656d76; --accent: #0969da; --ok: #1a7f37;
+      --warn: #9a6700; --err: #cf222e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  code, pre, .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+  a { color: var(--accent); }
+
+  header {
+    position: sticky; top: 0; z-index: 10; background: var(--panel);
+    border-bottom: 1px solid var(--line); padding: 12px 20px;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 650; }
+  header .sub { color: var(--dim); font-size: 12px; }
+  .pills { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+  .pill {
+    font-size: 11.5px; padding: 3px 9px; border-radius: 20px;
+    border: 1px solid var(--line); background: var(--panel2); white-space: nowrap;
+  }
+  .pill.on  { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
+  .pill.off { color: var(--err);  border-color: color-mix(in srgb, var(--err) 40%, var(--line)); }
+  .pill.busy{ color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+
+  nav { display: flex; gap: 2px; padding: 0 20px; border-bottom: 1px solid var(--line);
+        background: var(--panel); overflow-x: auto; }
+  nav button {
+    background: none; border: 0; border-bottom: 2px solid transparent; color: var(--dim);
+    padding: 10px 14px; cursor: pointer; font-size: 13.5px; white-space: nowrap;
+  }
+  nav button:hover { color: var(--fg); }
+  nav button.active { color: var(--fg); border-bottom-color: var(--accent); }
+
+  main { padding: 20px; max-width: 1180px; margin: 0 auto; }
+  section { display: none; }
+  section.active { display: block; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px; margin-bottom: 16px;
+  }
+  .card h2 { margin: 0 0 4px; font-size: 14px; font-weight: 650; }
+  .card p.hint { margin: 0 0 14px; color: var(--dim); font-size: 12.5px; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+
+  .stat { background: var(--panel2); border: 1px solid var(--line);
+          border-radius: var(--radius); padding: 14px; }
+  .stat .n { font-size: 26px; font-weight: 640; letter-spacing: -0.5px; }
+  .stat .l { color: var(--dim); font-size: 12px; margin-top: 2px; }
+
+  button.btn, .btn {
+    background: var(--accent); color: #fff; border: 0; border-radius: 7px;
+    padding: 8px 15px; font-size: 13px; cursor: pointer; font-weight: 550;
+  }
+  button.btn:hover { filter: brightness(1.1); }
+  button.btn:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+  button.ghost { background: var(--panel2); color: var(--fg); border: 1px solid var(--line); }
+  button.danger { background: var(--err); }
+  .row { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
+
+  input, textarea, select {
+    background: var(--bg); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 7px; padding: 8px 10px; font-size: 13px; font-family: inherit; width: 100%;
+  }
+  textarea { resize: vertical; min-height: 90px; }
+  input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  label { display: block; font-size: 12.5px; color: var(--dim); margin: 10px 0 4px; }
+
+  #drop {
+    border: 2px dashed var(--line); border-radius: var(--radius); padding: 32px 20px;
+    text-align: center; color: var(--dim); cursor: pointer; transition: .15s;
+  }
+  #drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+
+  #log {
+    background: #0a0d11; color: #c9d5e1; border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 12px; height: 340px; overflow-y: auto;
+    font-family: ui-monospace, Consolas, monospace; font-size: 12px; line-height: 1.5;
+  }
+  #log .WARNING { color: #e3b341; }
+  #log .ERROR { color: #ff7b72; }
+  #log .t { color: #6e7681; margin-right: 8px; }
+
+  .rec { border: 1px solid var(--line); border-radius: var(--radius);
+         padding: 12px 14px; margin-bottom: 10px; background: var(--panel2); }
+  .rec .q { font-weight: 600; margin-bottom: 6px; }
+  .rec .a { color: var(--dim); white-space: pre-wrap; font-size: 13px; }
+  .rec .meta { margin-top: 8px; font-size: 11.5px; color: var(--dim);
+               display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .tag { background: var(--bg); border: 1px solid var(--line); border-radius: 4px;
+         padding: 1px 6px; font-size: 11px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 550; font-size: 12px; }
+  td.num, th.num { text-align: right; font-family: ui-monospace, monospace; }
+
+  .msg { padding: 9px 12px; border-radius: 7px; margin-bottom: 12px; font-size: 13px; display: none; }
+  .msg.show { display: block; }
+  .msg.ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+  .msg.err { background: color-mix(in srgb, var(--err) 15%, transparent); color: var(--err); }
+  .warnbox { background: color-mix(in srgb, var(--warn) 12%, transparent);
+             border-left: 3px solid var(--warn); padding: 10px 12px;
+             border-radius: 0 7px 7px 0; margin-bottom: 10px; font-size: 13px; }
+  .empty { color: var(--dim); text-align: center; padding: 28px; font-size: 13px; }
+  .kwrow { display: flex; gap: 8px; margin-bottom: 7px; }
+  .spin { display: inline-block; width: 11px; height: 11px; border: 2px solid var(--line);
+          border-top-color: var(--accent); border-radius: 50%; animation: s .7s linear infinite; }
+  @keyframes s { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1 id="pname">Dataset Manager</h1>
+    <div class="sub" id="pdesc"></div>
+  </div>
+  <div class="pills">
+    <span class="pill" id="pill-llm">model …</span>
+    <span class="pill" id="pill-search">search …</span>
+    <span class="pill" id="pill-job">idle</span>
+  </div>
+</header>
+
+<nav>
+  <button data-tab="overview" class="active">Overview</button>
+  <button data-tab="upload">Upload</button>
+  <button data-tab="keywords">Keywords</button>
+  <button data-tab="run">Run</button>
+  <button data-tab="browse">Browse</button>
+  <button data-tab="teach">Teach</button>
+  <button data-tab="analyze">Analyze</button>
+  <button data-tab="exports">Exports</button>
+</nav>
+
+<main>
+  <div class="msg" id="msg"></div>
+
+  <!-- OVERVIEW -->
+  <section id="overview" class="active">
+    <div class="grid" id="stats"></div>
+    <div class="card">
+      <h2>Corpus</h2>
+      <p class="hint">Source documents on disk. Add more from the Upload tab.</p>
+      <div id="corpus"></div>
+    </div>
+    <div class="card">
+      <h2>Recent runs</h2>
+      <div id="runs"></div>
+    </div>
+  </section>
+
+  <!-- UPLOAD -->
+  <section id="upload">
+    <div class="card">
+      <h2>Add documents</h2>
+      <p class="hint">
+        PDF, Word, PowerPoint, Excel, Markdown, text, HTML, CSV, JSON. Scanned
+        (image-only) PDFs will not work — there is no OCR.
+      </p>
+      <label>Put them in</label>
+      <select id="folder">
+        <option value="docs">corpus/docs — reference material</option>
+        <option value="runbooks">corpus/runbooks — procedures (parsed step-by-step)</option>
+      </select>
+      <div style="height:12px"></div>
+      <div id="drop">
+        <strong>Drop files here</strong><br>or click to choose
+        <input type="file" id="file" multiple hidden>
+      </div>
+      <div id="uploads" style="margin-top:12px"></div>
+      <div class="row" style="margin-top:14px">
+        <button class="btn" onclick="run('build')">Build from these files</button>
+        <span class="hint" style="color:var(--dim)">Uploading alone does not generate anything.</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- KEYWORDS -->
+  <section id="keywords">
+    <div class="card">
+      <h2>Keywords</h2>
+      <p class="hint">
+        Searched on every build and every scheduled cycle: results are ranked,
+        the best pages scraped, and records generated from them. Saved into
+        <code>config.toml</code>.
+      </p>
+      <div id="kwlist"></div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn ghost" onclick="addKw('')">+ Add keyword</button>
+        <button class="btn" onclick="saveKw()">Save</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Try one first</h2>
+      <p class="hint">Scrape a single keyword now and see what it produces, before committing it above.</p>
+      <div class="row">
+        <input id="tryKw" placeholder="e.g. kubernetes CrashLoopBackOff troubleshooting" style="flex:1;min-width:240px">
+        <button class="btn" onclick="tryKeyword()">Scrape now</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Subject</h2>
+      <p class="hint">
+        Feeds the generation prompt, so the model writes examples for your
+        domain. Change this when you retarget the dataset.
+      </p>
+      <label>Name</label><input id="projName">
+      <label>Description</label><input id="projDesc">
+      <div class="row" style="margin-top:12px"><button class="btn" onclick="saveProject()">Save</button></div>
+    </div>
+  </section>
+
+  <!-- RUN -->
+  <section id="run">
+    <div class="card">
+      <h2>Run</h2>
+      <p class="hint">
+        Generation is slow — roughly 20–40s per chunk on a local 7B model. One
+        job at a time.
+      </p>
+      <div class="row">
+        <button class="btn" onclick="run('build')">Build</button>
+        <button class="btn ghost" onclick="run('build_full')">Full rebuild</button>
+        <button class="btn ghost" onclick="run('agent')">Run agent</button>
+        <button class="btn ghost" onclick="run('export')">Re-export</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Log</h2>
+      <div id="log"></div>
+    </div>
+  </section>
+
+  <!-- BROWSE -->
+  <section id="browse">
+    <div class="card">
+      <h2>Records</h2>
+      <div class="row" style="margin-bottom:12px">
+        <select id="fKind" style="width:auto" onchange="loadRecords()"><option value="">All kinds</option></select>
+        <input id="fQ" placeholder="Search…" style="flex:1;min-width:180px" oninput="debounceRecords()">
+        <label style="margin:0;display:flex;align-items:center;gap:6px;color:var(--fg)">
+          <input type="checkbox" id="fRej" style="width:auto" onchange="loadRecords()"> Rejected only
+        </label>
+      </div>
+      <div id="reclist"><div class="empty">Loading…</div></div>
+    </div>
+  </section>
+
+  <!-- TEACH -->
+  <section id="teach">
+    <div class="card">
+      <h2>Add a Q&amp;A pair you wrote</h2>
+      <p class="hint">
+        Stored exactly as written — not paraphrased, not machine-judged. These
+        are usually the highest-value rows in the set.
+      </p>
+      <label>Question</label><input id="tQ" placeholder="How do I …?">
+      <label>Answer</label><textarea id="tA"></textarea>
+      <div class="row" style="margin-top:12px"><button class="btn" onclick="teachPair()">Add</button></div>
+    </div>
+    <div class="card">
+      <h2>Record a solved case</h2>
+      <p class="hint">Something broke and you fixed it. Stored as a troubleshooting example.</p>
+      <label>Problem / symptom</label><textarea id="tP" style="min-height:70px"></textarea>
+      <label>Resolution</label><textarea id="tR" style="min-height:70px"></textarea>
+      <div class="row" style="margin-top:12px"><button class="btn" onclick="teachCase()">Add</button></div>
+    </div>
+    <div class="card">
+      <h2>Paste raw notes</h2>
+      <p class="hint">Goes through the normal pipeline — the local model generates records from it.</p>
+      <label>Title (optional)</label><input id="tT">
+      <label>Text</label><textarea id="tX" style="min-height:130px"></textarea>
+      <div class="row" style="margin-top:12px"><button class="btn" onclick="teachText()">Learn from this</button></div>
+    </div>
+  </section>
+
+  <!-- ANALYZE -->
+  <section id="analyze">
+    <div class="card">
+      <h2>Is it trainable?</h2>
+      <p class="hint">Truncation, train/eval leakage, duplicates, balance and volume.</p>
+      <div class="row">
+        <label style="margin:0;color:var(--fg)">max_seq_len</label>
+        <input id="msl" type="number" value="2048" style="width:110px">
+        <button class="btn" onclick="loadAnalysis()">Analyze</button>
+      </div>
+    </div>
+    <div id="analysis"></div>
+  </section>
+
+  <!-- EXPORTS -->
+  <section id="exports">
+    <div class="card">
+      <h2>Exports</h2>
+      <p class="hint" id="expdir"></p>
+      <div id="explist"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let logOffset = 0, state = null, recTimer = null;
+
+/* ---------- shell ---------- */
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('section').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  $('#' + b.dataset.tab).classList.add('active');
+  if (b.dataset.tab === 'browse') loadRecords();
+  if (b.dataset.tab === 'exports') loadExports();
+  if (b.dataset.tab === 'analyze') loadAnalysis();
+});
+
+function flash(text, ok = true) {
+  const m = $('#msg');
+  m.textContent = text;
+  m.className = 'msg show ' + (ok ? 'ok' : 'err');
+  clearTimeout(flash._t);
+  flash._t = setTimeout(() => m.className = 'msg', 6000);
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const d = await r.json().catch(() => ({ ok: false, error: 'bad response from server' }));
+  if (!r.ok || d.ok === false) throw new Error(d.error || ('HTTP ' + r.status));
+  return d;
+}
+const esc = s => (s ?? '').toString().replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+/* ---------- state ---------- */
+async function refresh() {
+  try { state = await api('/api/state'); } catch (e) { return; }
+  $('#pname').textContent = state.project.name || 'Dataset Manager';
+  $('#pdesc').textContent = state.project.description || '';
+  if (!$('#projName').value) $('#projName').value = state.project.name || '';
+  if (!$('#projDesc').value) $('#projDesc').value = state.project.description || '';
+
+  const llm = $('#pill-llm');
+  llm.textContent = (state.llm.available ? '● ' : '○ ') + state.llm.model;
+  llm.className = 'pill ' + (state.llm.available ? 'on' : 'off');
+  llm.title = state.llm.available ? 'local model reachable' : 'not reachable — start it with: ollama serve';
+
+  const s = $('#pill-search');
+  const searxng = state.search.engine === 'searxng';
+  s.textContent = searxng ? (state.search.up ? '● searxng' : '○ searxng (fallback)') : '● duckduckgo';
+  s.className = 'pill ' + (!searxng || state.search.up ? 'on' : 'busy');
+
+  const j = $('#pill-job');
+  if (state.job.running) { j.innerHTML = '<span class="spin"></span> ' + esc(state.job.current); j.className = 'pill busy'; }
+  else { j.textContent = 'idle'; j.className = 'pill'; }
+
+  const c = state.counts;
+  $('#stats').innerHTML = [
+    ['records', c.records], ['chunks', c.chunks],
+    ['documents', c.documents], ['runs', c.runs],
+  ].map(([l, n]) => `<div class="stat"><div class="n">${n.toLocaleString()}</div><div class="l">${l}</div></div>`).join('');
+
+  $('#corpus').innerHTML = ['docs', 'runbooks'].map(f => {
+    const d = state.corpus[f];
+    return `<div style="margin-bottom:10px">
+      <strong>corpus/${f}</strong> — ${d.count} file${d.count === 1 ? '' : 's'}
+      <div class="mono" style="color:var(--dim);font-size:11.5px">${esc(d.path)}</div>
+      <div style="margin-top:4px">${d.recent.map(n => `<span class="tag">${esc(n)}</span>`).join(' ') || '<span style="color:var(--dim)">empty</span>'}</div>
+    </div>`;
+  }).join('');
+
+  $('#runs').innerHTML = state.runs.length ? `<table><tr><th>started</th><th>mode</th><th class="num">records</th><th></th></tr>` +
+    state.runs.map(r => {
+      let st = {}; try { st = JSON.parse(r.stats || '{}'); } catch {}
+      return `<tr><td class="mono">${esc(r.started_at)}</td><td>${esc(r.mode)}</td>
+        <td class="num">${st.records ?? '—'}</td>
+        <td style="color:${r.ok ? 'var(--ok)' : 'var(--err)'}">${r.ok ? 'ok' : 'failed'}</td></tr>`;
+    }).join('') + '</table>' : '<div class="empty">No runs yet.</div>';
+
+  if (!$('#kwlist').dataset.dirty) renderKw(state.keywords);
+}
+
+/* ---------- log ---------- */
+async function pollLog() {
+  try {
+    const d = await api('/api/logs?offset=' + logOffset);
+    if (d.lines.length) {
+      const el = $('#log');
+      const stuck = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
+      el.insertAdjacentHTML('beforeend', d.lines.map(l =>
+        `<div class="${l.level}"><span class="t">${l.t}</span>${esc(l.msg)}</div>`).join(''));
+      if (stuck) el.scrollTop = el.scrollHeight;
+      logOffset = d.next;
+    }
+  } catch {}
+}
+
+/* ---------- actions ---------- */
+async function run(action, extra = {}) {
+  try {
+    const d = await api('/api/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, ...extra }),
+    });
+    if (d.started) {
+      flash('Started: ' + d.message + ' — watch the Run tab');
+      document.querySelector('nav button[data-tab="run"]').click();
+    } else flash(d.message, false);
+    refresh();
+  } catch (e) { flash(e.message, false); }
+}
+
+/* ---------- upload ---------- */
+const drop = $('#drop'), fileInput = $('#file');
+drop.onclick = () => fileInput.click();
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); upload(e.dataTransfer.files); };
+fileInput.onchange = () => upload(fileInput.files);
+
+async function upload(files) {
+  const folder = $('#folder').value, box = $('#uploads');
+  for (const f of files) {
+    const row = document.createElement('div');
+    row.innerHTML = `<span class="spin"></span> ${esc(f.name)}`;
+    box.prepend(row);
+    try {
+      const b64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result.split(',')[1]);
+        r.onerror = () => rej(new Error('could not read the file'));
+        r.readAsDataURL(f);
+      });
+      const d = await api('/api/upload', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder, name: f.name, data: b64 }),
+      });
+      row.innerHTML = `<span style="color:var(--ok)">✓</span> ${esc(f.name)}
+        <span style="color:var(--dim)">${(d.bytes / 1024).toFixed(0)} KB${d.replaced ? ' (replaced)' : ''}</span>`;
+    } catch (e) {
+      row.innerHTML = `<span style="color:var(--err)">✗</span> ${esc(f.name)} — <span style="color:var(--err)">${esc(e.message)}</span>`;
+    }
+  }
+  refresh();
+}
+
+/* ---------- keywords ---------- */
+function renderKw(terms) {
+  $('#kwlist').innerHTML = (terms.length ? terms : ['']).map((t, i) =>
+    `<div class="kwrow"><input value="${esc(t)}" oninput="dirtyKw()">
+     <button class="btn ghost" onclick="this.parentElement.remove();dirtyKw()">✕</button></div>`).join('');
+}
+function addKw() {
+  $('#kwlist').insertAdjacentHTML('beforeend',
+    `<div class="kwrow"><input oninput="dirtyKw()">
+     <button class="btn ghost" onclick="this.parentElement.remove();dirtyKw()">✕</button></div>`);
+  $('#kwlist').lastElementChild.querySelector('input').focus();
+  dirtyKw();
+}
+function dirtyKw() { $('#kwlist').dataset.dirty = '1'; }
+
+async function saveKw() {
+  const terms = [...$('#kwlist').querySelectorAll('input')].map(i => i.value.trim()).filter(Boolean);
+  try {
+    await api('/api/keywords', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ terms }),
+    });
+    delete $('#kwlist').dataset.dirty;
+    flash(`Saved ${terms.length} keyword${terms.length === 1 ? '' : 's'} to config.toml`);
+    refresh();
+  } catch (e) { flash(e.message, false); }
+}
+function tryKeyword() {
+  const k = $('#tryKw').value.trim();
+  if (!k) return flash('Type a keyword first', false);
+  run('scrape', { keyword: k });
+}
+async function saveProject() {
+  try {
+    await api('/api/project', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: $('#projName').value, description: $('#projDesc').value }),
+    });
+    flash('Subject saved — new records will be generated for it');
+    refresh();
+  } catch (e) { flash(e.message, false); }
+}
+
+/* ---------- records ---------- */
+function debounceRecords() { clearTimeout(recTimer); recTimer = setTimeout(loadRecords, 300); }
+async function loadRecords() {
+  const q = new URLSearchParams({
+    kind: $('#fKind').value, q: $('#fQ').value,
+    rejected: $('#fRej').checked ? '1' : '0', limit: '100',
+  });
+  try {
+    const d = await api('/api/records?' + q);
+    const sel = $('#fKind');
+    if (sel.options.length <= 1) {
+      Object.keys(d.kinds).forEach(k => sel.add(new Option(`${k} (${d.kinds[k]})`, k)));
+    }
+    $('#reclist').innerHTML = d.records.length ? d.records.map(r => `
+      <div class="rec">
+        <div class="q">${esc(r.instruction)}</div>
+        <div class="a">${esc(r.output)}</div>
+        <div class="meta">
+          <span class="tag">${esc(r.kind)}</span>
+          <span>score ${r.score ?? '—'}</span>
+          ${r.reason ? `<span>${esc(r.reason)}</span>` : ''}
+          <span class="tag">${esc((r.generator || '').split(':')[0])}</span>
+          <span style="margin-left:auto">${esc(r.source_title || '')}</span>
+        </div>
+      </div>`).join('') : '<div class="empty">Nothing matches.</div>';
+  } catch (e) { $('#reclist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+
+/* ---------- teach ---------- */
+async function teach(body, done) {
+  try {
+    const d = await api('/api/learn', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    flash(d.async ? 'Learning — watch the Run tab' : 'Added to the dataset');
+    done();
+    refresh();
+  } catch (e) { flash(e.message, false); }
+}
+const teachPair = () => teach({ mode: 'pair', question: $('#tQ').value, answer: $('#tA').value },
+  () => { $('#tQ').value = ''; $('#tA').value = ''; });
+const teachCase = () => teach({ mode: 'case', problem: $('#tP').value, resolution: $('#tR').value },
+  () => { $('#tP').value = ''; $('#tR').value = ''; });
+const teachText = () => teach({ mode: 'text', title: $('#tT').value, text: $('#tX').value },
+  () => { $('#tT').value = ''; $('#tX').value = ''; });
+
+/* ---------- analysis ---------- */
+async function loadAnalysis() {
+  const box = $('#analysis');
+  box.innerHTML = '<div class="card"><div class="empty">Analyzing…</div></div>';
+  try {
+    const d = await api('/api/analysis?max_seq_len=' + ($('#msl').value || 2048));
+    const r = d.report;
+    const tok = (s, l) => `<tr><td>${l}</td><td class="num">${s.p50}</td><td class="num">${s.p90}</td>
+      <td class="num">${s.p95}</td><td class="num">${s.maximum}</td></tr>`;
+    const tally = t => Object.entries(t).map(([k, v]) =>
+      `<tr><td>${esc(k)}</td><td class="num">${v}</td><td class="num">${Math.round(100 * v / r.total)}%</td></tr>`).join('');
+
+    box.innerHTML = `
+      <div class="card">
+        <div class="grid">
+          <div class="stat"><div class="n">${r.total}</div><div class="l">records</div></div>
+          <div class="stat"><div class="n">${r.train}/${r.eval}</div><div class="l">train / eval</div></div>
+          <div class="stat"><div class="n">${r.over_limit}</div><div class="l">would truncate at ${r.max_seq_len}</div></div>
+          <div class="stat"><div class="n">${r.leaked_between_splits}</div><div class="l">train/eval leakage</div></div>
+        </div>
+      </div>
+      ${r.warnings.length ? `<div class="card"><h2>Warnings</h2>${r.warnings.map(w => `<div class="warnbox">${esc(w)}</div>`).join('')}</div>` : ''}
+      ${r.notes.length ? `<div class="card"><h2>Notes</h2>${r.notes.map(n => `<p class="hint" style="margin:0 0 8px">${esc(n)}</p>`).join('')}</div>` : ''}
+      <div class="card">
+        <h2>Token lengths</h2>
+        <p class="hint">Estimated — confirm against your trainer's tokenizer.</p>
+        <table><tr><th>field</th><th class="num">p50</th><th class="num">p90</th><th class="num">p95</th><th class="num">max</th></tr>
+        ${tok(r.tokens_instruction, 'instruction')}${tok(r.tokens_output, 'output')}${tok(r.tokens_total, 'combined')}</table>
+      </div>
+      <div class="card">
+        <h2>Composition</h2>
+        <table><tr><th>kind</th><th class="num">rows</th><th class="num">share</th></tr>${tally(r.by_kind)}</table>
+        <div style="height:14px"></div>
+        <table><tr><th>source</th><th class="num">rows</th><th class="num">share</th></tr>${tally(r.by_source)}</table>
+      </div>`;
+  } catch (e) { box.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; }
+}
+
+/* ---------- exports ---------- */
+async function loadExports() {
+  try {
+    const d = await api('/api/exports');
+    $('#expdir').textContent = d.dir;
+    $('#explist').innerHTML = d.files.length
+      ? `<table><tr><th>file</th><th class="num">size</th><th>modified</th><th></th></tr>` +
+        d.files.map(f => `<tr><td class="mono">${esc(f.name)}</td><td class="num">${f.human}</td>
+          <td style="color:var(--dim)">${f.modified}</td>
+          <td><a href="/download/${encodeURIComponent(f.name)}">download</a></td></tr>`).join('') + '</table>'
+      : '<div class="empty">Nothing exported yet — run a build.</div>';
+  } catch (e) { $('#explist').innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+
+/* ---------- boot ---------- */
+refresh(); pollLog();
+setInterval(refresh, 4000);
+setInterval(pollLog, 1500);
+</script>
+</body>
+</html>

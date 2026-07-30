@@ -1,13 +1,13 @@
 {
   "dataset": "pcai-dataset",
-  "generated_at": "2026-07-30T19:18:03Z",
+  "generated_at": "2026-07-30T20:19:56Z",
   "generated_by": "local model qwen2.5-coder:7b via ollama (http://localhost:11434)",
   "records": 26,
   "train": 23,
   "eval": 3,
-  "chunks": 12,
+  "chunks": 13,
   "glossary_terms": 7,
-  "kalam_kb_docs": 13,
+  "kalam_kb_docs": 14,
   "kinds": {
     "qa": 9,
     "instruction": 9,
