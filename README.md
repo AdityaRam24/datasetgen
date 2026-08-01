@@ -21,7 +21,9 @@ cd dataset-generation
 # 0. Optional but recommended parsers (it runs without them — see "Fallbacks")
 pip install -r requirements.txt
 
-# 1. Make sure the local model is up
+# 1. Make sure the local model is up. If the model named in config.toml is not
+#    pulled, datagen substitutes the closest installed one rather than failing —
+#    but pulling the one you actually want gives better records.
 ollama serve
 ollama pull nomic-embed-text        # for semantic dedupe
 
@@ -40,6 +42,9 @@ python -m datagen status
 
 # 6. Teach it something of your own
 python -m datagen learn -q "How do I free a GPU?" -a "Scale the endpoint to zero replicas."
+
+# 7. Then hand it over: it now keeps itself current, on its own, forever
+python -m datagen watch
 ```
 
 Prefer clicking to typing? `python -m datagen serve` opens a local web UI that does all
@@ -253,18 +258,30 @@ The heuristic planner drives the same tools in a fixed sensible order, so
 
 ### How it updates itself
 
-1. `watch` wakes on `schedule.interval_min` and re-runs.
-2. Unchanged documents are skipped by content hash; changed ones have their stale chunks
-   and records dropped and regenerated.
+`[schedule] enabled = true` in the shipped config, so this is the intended way to run it:
+start it once and leave it.
+
+```bash
+python -m datagen watch                     # uses schedule.interval_min (6h)
+python -m datagen watch --interval 360      # or override it
+python -m datagen watch --once --no-agent   # one plain pipeline cycle
+```
+
+1. `watch` wakes on `schedule.interval_min` and re-runs the agent.
+2. Every source is re-checked: local docs, runbooks, **Confluence**, the crawl and the
+   keyword searches. Unchanged documents are skipped by content hash; changed ones have
+   their stale chunks and records dropped and regenerated.
 3. After each run the agent asks the local model *what is missing*, and writes concrete
    keywords/URLs into the `discovered` table.
 4. The next run's web and keyword connectors pick those up automatically.
 5. Every `full_rebuild_every` cycles it rebuilds from scratch to clear any drift.
+6. Each cycle re-exports and rewrites `server/pcai/learned.json`, so the Kalam assistant
+   keeps improving without anyone running a command.
 
-```bash
-python -m datagen watch --interval 360      # every 6 hours
-python -m datagen watch --once --no-agent   # one plain pipeline cycle
-```
+**If Ollama is down, the cycle is skipped, not degraded.** An unattended loop that keeps
+going without a model would quietly fill the dataset with sliced-up source text that you
+would then have to find and delete by hand. Skipping costs one interval and loses nothing,
+because documents only count as processed once their records exist.
 
 On Windows, run it under Task Scheduler or NSSM. Interrupting it is always safe — state
 is committed to SQLite after every step.
@@ -297,6 +314,21 @@ CONFLUENCE_USER=you@example.com     # leave empty for a Server/DC PAT
 CONFLUENCE_TOKEN=...
 ```
 
+**Space keys are verified before searching.** CQL naming a space that does not exist
+returns an empty result set with a `200` — indistinguishable from "the wiki has nothing"
+unless you look, and the reason a connected wiki can report `fetched: 0` run after run. So
+the connector checks your `spaces` against the wiki, logs the keys your token *can* read,
+and falls back to `text_search` across every readable space:
+
+```toml
+spaces      = ["PCAI", "OPS"]        # checked at run time
+text_search = ["Private Cloud AI", "MLIS", "runbook", "troubleshooting"]
+cql         = ""                     # raw CQL overrides both
+```
+
+That fallback is what makes it useful on a wiki you have access to but have not
+catalogued. Set `spaces` properly once you know the keys — it is cheaper and more precise.
+
 **`[[sources.web]]`** — breadth-first crawl with a domain allow-list, deny patterns,
 robots.txt, per-host delay, and hard caps on pages/depth/size. Linked PDFs are parsed,
 not skipped.
@@ -321,9 +353,22 @@ bulk. Dedupe runs against *history*, not just the current batch.
 
 **Quality gate, cheap checks first.** Length bounds, questions that reference "the text
 above", non-answers, page chrome, unbalanced code fences, garbled extraction → then a
-grounding score (how much of the answer's content, especially its numbers, flags and
-paths, appears in the source chunk) → then the local model scoring faithfulness,
-usefulness and self-containment.
+grounding score → then the local model scoring faithfulness, usefulness and
+self-containment.
+
+**Grounding scores identifiers strictly and prose leniently.** The obvious metric — how
+many of the answer's tokens appear in the source — is actively harmful: it scores a
+verbatim copy 1.0 and a well-written explanation 0.2, because words like *cause*,
+*diagnose* and *verify* are what a good answer adds and a source rarely repeats. Training
+on the copies and discarding the explanations is the opposite of the goal. What actually
+signals an off-source answer is an **identifier** the model invented — a command, a flag,
+a path, an error code — so those are checked strictly while prose is not. A runbook answer
+that explains `503 → CrashLoopBackOff` in its own words passes; a glossary entry defining
+TLS from the model's own knowledge still fails.
+
+Short answers are kept. `"Which auth broker does PCAI use?" → "Keycloak"` is a perfect
+record, and a high `quality.min_answer_chars` (default 12) silently deletes exactly the
+crisp factual lookups an ops assistant is asked for.
 
 Rejected records are **quarantined, not deleted** — they go to `data/quarantine.jsonl`
 with a reason so you can tune `quality.min_score` rather than guess:
@@ -446,13 +491,19 @@ Every dependency is optional and probed at runtime:
 
 | Missing | What happens |
 |---|---|
-| **The local model is down** | Extractive generation: headings become questions, ordered steps become procedures, error lines become troubleshooting prompts. Grounded by construction — the answer *is* the source text. Set `allow_extractive_fallback = false` to hard-fail instead |
+| **`llm.model` is not pulled** | Resolved automatically: first by tag (`qwen2.5:7b-instruct` matches an installed `…-q4_K_M`), then to the closest installed chat model of the same family. Embedding and vision models are ranked last so they can never be picked to write your dataset. One warning line names the substitute and the `ollama pull` that would avoid it |
+| **`embeddings.model` is not pulled** | Substituted with any installed embedder, or embeddings are switched off for the run — semantic dedupe goes with them, exact and SimHash stay |
+| **The local model is down** | A one-shot `build` falls back to extractive generation: headings become questions, ordered steps become procedures, error lines become troubleshooting prompts. Grounded by construction — the answer *is* the source text. Set `allow_extractive_fallback = false` to hard-fail instead. **`watch` does not do this** — it skips the cycle (see below) |
+| A call fails fatally (404 / 401 / model not found) | The LLM is disabled for the rest of the run after **one** error line, instead of retrying per chunk. A missing model used to cost 20 minutes of identical 404s |
 | `pypdf` | A built-in extractor inflates FlateDecode streams and reads the text operators. Fine for digital PDFs, no OCR |
 | `python-docx` / `python-pptx` / `openpyxl` | Built-in OOXML unzip-and-strip |
 | `trafilatura` / `bs4` | Built-in `HTMLParser` stripper that drops script/style/nav |
 | Embeddings unavailable | Semantic dedupe off, exact + SimHash still run |
 | Search engine blocked | The keyword is saved as a lead and retried next run |
 | A source raises | Logged, that source is skipped, the run continues |
+| A host does not resolve | Remembered for the run, so the other 40 links pointing at it are skipped instead of costing ~20s each in retries |
+| A URL contains non-ASCII | Percent-encoded (IDNA for the host). A single link with an em dash in its slug used to abort the whole crawl with `UnicodeEncodeError` |
+| **The run is interrupted mid-generation** | Nothing is lost. Documents and chunks are marked processed *only* after their records are on disk, so the next run redoes exactly the work that did not finish |
 
 `python -m datagen doctor` tells you which path each one is on.
 
@@ -501,7 +552,15 @@ the cost of speed. Check what you have with `doctor`.
 process on one GPU, and more than ~4 concurrent requests usually makes it *slower*, not
 faster. Use `build --limit 20` to sanity-check prompt changes before a full run.
 
-**Too much rejected**: `inspect --rejected` first. If the reasons are `ungrounded`, the
-model is inventing — use a bigger model or lower `chunking.max_chars`. If they are
-heuristic rejections, the source text is probably navigation chrome and the fix is a
-tighter `deny_patterns`.
+**Too much rejected**: `inspect --rejected` first — the reason is on every row. If the
+reasons are `ungrounded`, the model is inventing identifiers that are not in the source;
+use a bigger model or lower `chunking.max_chars`. If they are heuristic rejections, the
+source text is probably navigation chrome and the fix is a tighter `deny_patterns`. If the
+judge is rejecting answers you think are fine, lower `quality.min_score` — a 7B judge is
+noisy, and nothing is deleted either way.
+
+**Too few records**: this is usually sources, not settings. Three keywords and one seed URL
+produce a few dozen rows; a supervised fine-tune realistically wants 500+, and below ~100
+you are more likely to damage the base model than teach it. Add keyword terms, add crawl
+seeds, drop more files into `corpus/docs/`, and connect Confluence. `analyze` will tell you
+plainly when the volume is still too low and the data is better used for RAG.

@@ -87,6 +87,31 @@ class ConfluenceClient:
             if not data.get("_links", {}).get("next"):
                 return
 
+    def spaces(self, limit: int = 200) -> list[dict]:
+        """Every space this token can see: [{key, name}, ...].
+
+        Used to check the configured keys before searching. A CQL query naming a
+        space that does not exist returns an empty result set with a 200, which
+        is indistinguishable from "the wiki has nothing" unless you look.
+        """
+        out: list[dict] = []
+        start = 0
+        while len(out) < limit:
+            url = f"{self.base_url}/rest/api/space?limit=50&start={start}"
+            try:
+                data = http_request(url, headers=self.headers, timeout=30, retries=0).json()
+            except (HttpError, ValueError) as e:
+                log.debug("space listing failed: %s", e)
+                break
+            results = data.get("results", [])
+            if not results:
+                break
+            out.extend({"key": s.get("key", ""), "name": s.get("name", "")} for s in results)
+            start += len(results)
+            if not (data.get("_links") or {}).get("next"):
+                break
+        return out
+
     def attachments(self, page_id: str, limit: int = 25) -> list[dict]:
         url = f"{self.base_url}/rest/api/content/{page_id}/child/attachment?limit={limit}"
         try:
@@ -151,20 +176,72 @@ def _strip(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_cql(block: dict) -> str:
+def build_cql(block: dict, spaces: list[str] | None = None, text_terms: list[str] | None = None) -> str:
     if block.get("cql"):
         return str(block["cql"])
-    spaces = block.get("spaces", [])
+    spaces = block.get("spaces", []) if spaces is None else spaces
     parts = ["type = page"]
     if spaces:
         joined = ", ".join(f'"{s}"' for s in spaces)
         parts.append(f"space in ({joined})")
+    if text_terms:
+        ors = " OR ".join(f'text ~ "{t}"' for t in text_terms if t)
+        if ors:
+            parts.append(f"({ors})")
     if block.get("labels"):
         labels = ", ".join(f'"{l}"' for l in block["labels"])
         parts.append(f"label in ({labels})")
     if block.get("updated_since"):        # e.g. "-30d" or "2026-01-01"
         parts.append(f'lastmodified >= "{block["updated_since"]}"')
     return " AND ".join(parts) + " ORDER BY lastmodified DESC"
+
+
+def _resolve_cql(client: ConfluenceClient, block: dict, name: str, terms: list[str]) -> str:
+    """Pick a CQL query that will actually match something.
+
+    Configured space keys are checked against the wiki first: a key that does
+    not exist matches zero pages and reports no error, which is exactly how a
+    run ends with `fetched: 0` and no explanation. When none of the configured
+    keys exist we fall back to a text search across every readable space, which
+    is what you want from a wiki you have access to but have not catalogued.
+    """
+    if block.get("cql"):
+        return str(block["cql"])
+
+    wanted = [str(s).strip() for s in block.get("spaces", []) if str(s).strip()]
+    if not wanted:
+        return build_cql(block, spaces=[], text_terms=terms)
+
+    available = client.spaces()
+    if not available:
+        return build_cql(block)          # cannot verify; try as configured
+
+    keys = {s["key"].upper(): s["key"] for s in available if s.get("key")}
+    valid = [keys[w.upper()] for w in wanted if w.upper() in keys]
+    missing = [w for w in wanted if w.upper() not in keys]
+
+    if missing:
+        log.warning(
+            "[%s] space key(s) %s do not exist on this wiki. Readable spaces: %s",
+            name, ", ".join(missing),
+            ", ".join(sorted(keys.values())[:25]) or "none",
+        )
+    if valid:
+        return build_cql(block, spaces=valid, text_terms=None)
+
+    if terms:
+        log.warning(
+            "[%s] none of the configured spaces exist — searching all %d readable "
+            "spaces for %s instead", name, len(available), ", ".join(terms[:5]),
+        )
+        return build_cql(block, spaces=[], text_terms=terms)
+
+    log.warning(
+        "[%s] none of the configured spaces exist and no `text_search` terms are "
+        "set — this source will return nothing. Set `spaces` to one of the keys "
+        "above, or add text_search terms.", name,
+    )
+    return build_cql(block, spaces=valid or wanted, text_terms=None)
 
 
 def fetch(cfg: Any, block: dict, state: Any = None) -> list[Document]:
@@ -180,11 +257,13 @@ def fetch(cfg: Any, block: dict, state: Any = None) -> list[Document]:
     if not client.ping():
         return []
 
-    cql = build_cql(block)
-    log.info("[%s] CQL: %s", name, cql)
-
     tags = list(block.get("tags", ["confluence"]))
     max_pages = int(block.get("max_pages", 500))
+    terms = [str(t) for t in block.get("text_search", []) if str(t).strip()]
+
+    cql = _resolve_cql(client, block, name, terms)
+    log.info("[%s] CQL: %s", name, cql)
+
     docs: list[Document] = []
 
     for item in client.search(cql, limit=max_pages):

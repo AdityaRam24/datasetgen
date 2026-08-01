@@ -107,10 +107,16 @@ class Scheduler:
     def _cycle(self, state: StateStore, full: bool) -> None:
         llm = LocalLLM(self.cfg.llm)
         if not llm.available(recheck=True):
+            # Deliberately do NOT fall back to extractive generation here. An
+            # unattended loop that keeps running while the model is down fills
+            # the dataset with sliced-up source text that then has to be found
+            # and removed by hand. Skipping costs one cycle; nothing is lost,
+            # because documents are only marked processed once records exist.
             log.warning(
-                "local model unreachable this cycle — running extractive only. "
-                "Start it with `ollama serve` and the next cycle will use it."
+                "local model unreachable — skipping this cycle. Start it with "
+                "`ollama serve`; the next cycle picks up exactly where this left off."
             )
+            return
 
         if self.use_agent and self.cfg.agent.enabled and llm.available():
             # The agent picks up proposed leads and widens coverage on its own.

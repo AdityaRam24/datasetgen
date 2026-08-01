@@ -69,7 +69,10 @@ semantic_threshold = 0.94
 # `glossary` extracts defined terms; they are merged corpus-wide into
 # exports/GLOSSARY.md rather than staying one row per chunk.
 kinds              = ["qa", "instruction", "troubleshooting", "glossary"]
-pairs_per_chunk    = 3
+# Split across the kinds a chunk qualifies for (usually 3), so 6 means roughly
+# two examples per kind per chunk. Raise `llm.num_ctx` before raising this much
+# further, or long answers start getting cut off mid-sentence.
+pairs_per_chunk    = 6
 max_workers        = 4
 include_citations  = true       # every record carries source url/title/chunk id
 skip_if_unchanged  = true       # incremental: only regenerate for changed chunks
@@ -115,12 +118,21 @@ tags    = ["runbook", "ops"]
 name       = "wiki"
 enabled    = true
 # YOUR SPACE KEYS — the short code in the page URL, e.g. /wiki/spaces/OPS/pages/...
-# Replace these placeholders; if a key does not exist the search returns nothing.
+# These are checked against the wiki at run time: keys that do not exist are
+# reported along with the list of spaces your token CAN read, and the search
+# falls back to `text_search` below rather than silently returning nothing.
 spaces     = ["PCAI", "OPS"]
-cql        = ""                  # optional raw CQL; overrides `spaces` entirely
+# Used when none of the `spaces` above exist — searches every readable space for
+# pages mentioning these. This is what makes the connector useful on a wiki you
+# have access to but have not catalogued yet.
+text_search = [
+  "Private Cloud AI", "PCAI", "MLIS", "MLDM", "MLDE", "Ezmeral",
+  "AI Essentials", "runbook", "troubleshooting",
+]
+cql        = ""                  # optional raw CQL; overrides everything above
 # Start small. Raise this once you have seen what a run produces — 500 pages is
 # hours of generation on a local 7B model.
-max_pages  = 25
+max_pages  = 100
 include_attachments = true       # pulls PDF/DOCX attachments through the file parsers
 # Only pages edited since this point. "-30d", "-6m" or "2026-01-01".
 # Leave empty for everything.
@@ -133,11 +145,20 @@ name       = "hpe-pcai-docs"
 enabled    = true
 seeds      = [
   "https://developer.hpe.com/platform/hpe-private-cloud-ai/home/",
+  "https://developer.hpe.com/platform/hpe-ezmeral-unified-analytics/home/",
+  "https://developer.hpe.com/platform/hpe-greenlake/home/",
 ]
 allow_domains = ["developer.hpe.com", "docs.ai-solutions.ext.hpe.com"]
-deny_patterns = ["/login", "/search", "\\.zip$", "\\.png$"]
-max_pages  = 60
-max_depth  = 2
+# The first run wasted a third of its budget on Events, Training, Slack-signup
+# and newsletter pages — nav furniture with no technical content. These are the
+# paths that produced nothing useful.
+deny_patterns = [
+  "/login", "/search", "\\.zip$", "\\.png$", "\\.jpe?g$", "\\.svg$", "\\.mp4$",
+  "/events?/", "/training/", "/newsletter/", "/slack-signup", "/community/",
+  "/campaign/", "/uploads/", "\\?", "/tag/", "/author/", "/page/\\d+",
+]
+max_pages  = 120
+max_depth  = 3
 delay_ms   = 800                 # be polite
 respect_robots = true
 tags       = ["web", "vendor-docs"]
@@ -149,11 +170,27 @@ enabled  = true
 engine   = "searxng"          # searxng | duckduckgo — see searxng/setup.py
 searxng_url = "http://localhost:8888"   # falls back to DuckDuckGo if unreachable
 results_per_keyword = 8
-max_pages_per_keyword = 10
+max_pages_per_keyword = 6
+# Three keywords produced a 60-record dataset — far below the ~500 a fine-tune
+# needs. These cover the PCAI stack component by component, weighted toward
+# failure modes because that is what the assistant is asked about.
 terms = [
   "HPE Private Cloud AI troubleshooting",
+  "HPE Private Cloud AI architecture components",
+  "HPE AI Essentials administration guide",
+  "HPE Ezmeral Unified Analytics troubleshooting",
   "MLIS deployment error",
+  "MLIS endpoint 503 unavailable",
+  "MLDE Determined AI experiment failure",
   "Pachyderm MLDM pipeline failure",
+  "NVIDIA NIM inference microservice error",
+  "kubernetes pod CrashLoopBackOff diagnose fix",
+  "kubernetes ImagePullBackOff private registry fix",
+  "kubernetes pod OOMKilled troubleshooting",
+  "kubernetes PersistentVolumeClaim pending troubleshooting",
+  "GPU operator driver pod failure kubernetes",
+  "istio ingress gateway 503 upstream connect error",
+  "keycloak SSO authentication failure troubleshooting",
 ]
 
 # -----------------------------------------------------------------------------
@@ -179,7 +216,7 @@ max_proposed_per_run = 10
 # Scheduler: "it updates itself"
 # -----------------------------------------------------------------------------
 [schedule]
-enabled       = false
+enabled       = true
 interval_min  = 360           # re-check every 6h
 full_rebuild_every = 14       # every Nth cycle, ignore caches and rebuild
 jitter_pct    = 10

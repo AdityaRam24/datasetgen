@@ -91,6 +91,10 @@ class QualityConfig:
     require_grounded: bool = True
     max_answer_chars: int = 2000
     min_question_chars: int = 12
+    # "Which auth broker does PCAI use?" -> "Keycloak" is a perfect record. A
+    # high floor here silently deletes exactly the crisp factual lookups an ops
+    # assistant is asked for; grounding and the judge still police short answers.
+    min_answer_chars: int = 12
 
 
 @dataclass
@@ -244,6 +248,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
             require_grounded=bool(_get(raw, "quality.require_grounded", True)),
             max_answer_chars=int(_get(raw, "quality.max_answer_chars", 2000)),
             min_question_chars=int(_get(raw, "quality.min_question_chars", 12)),
+            min_answer_chars=int(_get(raw, "quality.min_answer_chars", 12)),
         ),
         agent=AgentConfig(
             enabled=bool(_get(raw, "agent.enabled", True)),

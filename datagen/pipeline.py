@@ -109,9 +109,11 @@ class Pipeline:
                 continue
             chunk.embedding = embeddings.get(chunk.id)
             kept.append(chunk)
-            self.state.add_chunk(
-                chunk.id, chunk.doc_id, sha256(normalize_for_hash(chunk.text)), simhash(chunk.text)
-            )
+            # NB: chunks are registered in state only once their records are on
+            # disk (see persist). Registering here would mark the work as done
+            # before it was done: a crash or a Ctrl-C during generation would
+            # leave the chunk recorded with no records, and every later
+            # incremental run would skip its document as "already processed".
 
         stats.duplicates_exact = deduper.stats.exact
         stats.duplicates_near = deduper.stats.near
@@ -195,7 +197,14 @@ class Pipeline:
         self._append_jsonl(
             self.cfg.chunks_path, [_chunk_row(c) for c in chunks], replace=full
         )
+        # Only now is the work durable, so only now do the chunks count as
+        # processed. Ordering matters: records first, then chunks — the reverse
+        # would reintroduce the "processed but empty" state after a crash.
         self.state.add_records(fresh)
+        for chunk in chunks:
+            self.state.add_chunk(
+                chunk.id, chunk.doc_id, sha256(normalize_for_hash(chunk.text)), simhash(chunk.text)
+            )
 
         log.info(
             "persisted: +%d new records (%d total), %d quarantined, %d chunks",

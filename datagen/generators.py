@@ -280,6 +280,28 @@ _ERROR_LINE = re.compile(
 )
 
 
+_SENTENCE_END = re.compile(r"[.!?:](?=\s|$)|\n\s*[-*\d]")
+
+
+def _whole_sentences(text: str) -> str:
+    """Drop a trailing half-sentence.
+
+    Chunking cuts on a character budget, so the tail of a chunk is usually a
+    severed clause. An extractive answer IS the chunk body, so that severed
+    clause becomes the end of a training answer — the single most obvious
+    "this dataset is machine-made" tell.
+    """
+    text = text.rstrip()
+    if not text or text[-1] in ".!?:;)]`\"'":
+        return text
+    ends = [m.end() for m in _SENTENCE_END.finditer(text)]
+    if not ends:
+        return text
+    cut = ends[-1]
+    # Only trim a tail, never most of the answer.
+    return text[:cut].rstrip() if cut >= len(text) * 0.6 else text
+
+
 def _extractive(chunk: Chunk, kinds: list[str]) -> list[Record]:
     """Deterministic records built from structure alone.
 
@@ -291,7 +313,7 @@ def _extractive(chunk: Chunk, kinds: list[str]) -> list[Record]:
     body = chunk.text
     if heading and body.startswith(chunk.heading):
         body = body[len(chunk.heading) :].strip()
-    body = clean_text(body)
+    body = _whole_sentences(clean_text(body))
     if len(body) < 80:
         return out
 

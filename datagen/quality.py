@@ -77,7 +77,7 @@ def heuristic_check(rec: Record, cfg: QualityConfig) -> Verdict:
 
     if len(q) < cfg.min_question_chars:
         return Verdict(False, 0.0, "question too short")
-    if len(a) < 30:
+    if len(a) < cfg.min_answer_chars:
         return Verdict(False, 0.0, "answer too short")
     if len(a) > cfg.max_answer_chars:
         return Verdict(False, 0.2, f"answer too long ({len(a)} chars)")
@@ -105,25 +105,58 @@ def heuristic_check(rec: Record, cfg: QualityConfig) -> Verdict:
     return Verdict(True, 0.75, "heuristics ok")
 
 
-def grounding_score(rec: Record) -> float:
-    """Fraction of the answer's content tokens that appear in the source chunk.
+# `<pod-name>`, `{namespace}` — placeholders the answer invents by design. They
+# are not claims about the source and must not count against grounding.
+_PLACEHOLDER = re.compile(r"[<{\[][a-z0-9_.\- ]{2,40}[>}\]]", re.I)
 
-    Not a perfect signal — a good answer paraphrases — but a *low* score
-    reliably indicates the model went off-source.
+
+def _norm_tokens(text: str) -> set[str]:
+    """Tokens with sentence punctuation stripped.
+
+    The shared tokenizer keeps '.' inside tokens so that `v1.2` and `foo.yaml`
+    survive — which also means "ready." never matches "ready" in the source.
+    """
+    return {t for t in (tok.strip(".,;:!?()") for tok in tokenize(text)) if t}
+
+
+def _is_identifier(token: str) -> bool:
+    """Commands, flags, paths, versions, error codes — the tokens a model
+    hallucinates when it goes off-source.
+
+    Tested on an already-stripped token: otherwise every sentence-final word
+    ("ready.", "failing.") looks like a dotted identifier and a perfectly
+    grounded answer gets marked as invented.
+    """
+    return any(c.isdigit() for c in token) or any(c in token for c in "/-_.")
+
+
+def grounding_score(rec: Record) -> float:
+    """How much of the answer is actually supported by its source chunk.
+
+    Plain token overlap is the obvious metric and it is wrong: it scores a
+    verbatim copy 1.0 and a well-written explanation 0.2, because words like
+    "cause", "diagnose" and "verify" are what an answer adds and a source rarely
+    repeats. Training on the copies and discarding the explanations is the exact
+    opposite of what this dataset is for.
+
+    What actually indicates an off-source answer is an *identifier* that is not
+    in the source — a command, a flag, a path, an error code that the model
+    invented. So identifiers are scored strictly and prose leniently.
     """
     if not rec.context:
         return 1.0
-    answer_tokens = set(tokenize(rec.output))
+    answer_tokens = _norm_tokens(_PLACEHOLDER.sub(" ", rec.output))
     if not answer_tokens:
         return 0.0
-    source_tokens = set(tokenize(rec.context))
-    # Numbers, flags and paths are the tokens that matter most for grounding.
-    hard = {t for t in answer_tokens if any(c.isdigit() for c in t) or "/" in t or "-" in t}
+    source_tokens = _norm_tokens(rec.context)
     overlap = len(answer_tokens & source_tokens) / len(answer_tokens)
-    if hard:
-        hard_overlap = len(hard & source_tokens) / len(hard)
-        return overlap * 0.6 + hard_overlap * 0.4
-    return overlap
+
+    hard = {t for t in answer_tokens if _is_identifier(t)}
+    if not hard:
+        # No technical claims to verify: prose overlap is all we have.
+        return overlap
+    hard_overlap = len(hard & source_tokens) / len(hard)
+    return max(overlap, hard_overlap * 0.75 + overlap * 0.25)
 
 
 def judge(rec: Record, llm: LocalLLM) -> Verdict | None:

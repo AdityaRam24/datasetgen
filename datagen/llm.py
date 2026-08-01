@@ -17,6 +17,7 @@ returns None and callers fall back to deterministic extraction.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -54,6 +55,7 @@ class LocalLLM:
         self.cfg = cfg
         self.stats = LLMStats()
         self._available: bool | None = None
+        self._embed_checked = False
         self._lock = threading.Lock()
 
     # -- health -------------------------------------------------------------
@@ -76,8 +78,11 @@ class LocalLLM:
                     else f"{self.cfg.base_url}/v1/models"
                 )
                 http_request(url, timeout=8, retries=0)
-                self._available = True
-                log.info("local LLM reachable at %s (model=%s)", self.cfg.base_url, self.cfg.model)
+                self._available = self._resolve_model()
+                if self._available:
+                    log.info(
+                        "local LLM reachable at %s (model=%s)", self.cfg.base_url, self.cfg.model
+                    )
             except HttpError as e:
                 self._available = False
                 log.warning(
@@ -87,6 +92,50 @@ class LocalLLM:
                     e,
                 )
             return self._available
+
+    def _resolve_model(self) -> bool:
+        """Verify the configured model is actually installed.
+
+        A reachable daemon says nothing about the model: asking for one that was
+        never pulled 404s on *every* call, and the run then spends half an hour
+        producing extractive junk. Check once, substitute an installed chat model
+        if we can, and give up loudly if we cannot.
+        """
+        installed = self.installed_models()
+        if not installed:
+            return True  # server reports nothing useful; let the call decide
+
+        self._resolve_embed_model(installed)
+
+        want = self.cfg.model
+        if want in installed:
+            return True
+
+        # Tolerate tag drift: `qwen2.5:7b-instruct` vs `qwen2.5:7b-instruct-q4_K_M`,
+        # and a bare name against the `:latest` tag.
+        for name in installed:
+            if name == f"{want}:latest" or name.startswith(want) or want.startswith(name):
+                log.warning("model %r is not installed — using %r instead", want, name)
+                self.cfg.model = name
+                return True
+
+        chat = [m for m in installed if not _looks_like_embedder(m, {})]
+        if chat:
+            pick = min(chat, key=lambda m: (_family_rank(m, want), m))
+            log.warning(
+                "model %r is not installed. Falling back to %r "
+                "(installed: %s). Fix this in config.toml or run: ollama pull %s",
+                want, pick, ", ".join(sorted(installed)), want,
+            )
+            self.cfg.model = pick
+            return True
+
+        log.error(
+            "model %r is not installed and no chat model is available (installed: %s). "
+            "Run: ollama pull %s — generation will be extractive-only until you do.",
+            want, ", ".join(sorted(installed)) or "none", want,
+        )
+        return False
 
     def model_catalog(self) -> list[dict[str, Any]]:
         """Installed models with size and parameter count, for a picker UI.
@@ -134,6 +183,36 @@ class LocalLLM:
         except (HttpError, ValueError, KeyError):
             return []
 
+    def _resolve_embed_model(self, installed: list[str]) -> None:
+        """Same check for the embedding model, which fails separately.
+
+        A missing embedder does not stop the run — it just silently disables
+        semantic dedupe after failing once per batch. Substitute or switch it
+        off deliberately, with one line saying so.
+        """
+        if not self.cfg.embed_enabled or self._embed_checked:
+            return
+        self._embed_checked = True
+
+        want = self.cfg.embed_model
+        if want in installed or any(m.startswith(want) for m in installed):
+            return
+
+        embedders = [m for m in installed if _looks_like_embedder(m, {})]
+        if embedders:
+            pick = sorted(embedders)[0]
+            log.warning("embedding model %r is not installed — using %r", want, pick)
+            self.cfg.embed_model = pick
+            return
+
+        log.warning(
+            "embedding model %r is not installed and no embedder is available. "
+            "Semantic near-duplicate detection is off for this run; exact and "
+            "fuzzy dedupe still apply. Run: ollama pull %s",
+            want, want,
+        )
+        self.cfg.embed_enabled = False
+
     # -- generation ---------------------------------------------------------
 
     def complete(
@@ -168,6 +247,21 @@ class LocalLLM:
                 self.stats.record(True, len(prompt), len(text or ""), time.time() - started)
                 return text
             except (HttpError, ValueError, KeyError) as e:
+                # A missing model, a bad payload — retrying cannot fix these, and
+                # retrying them once per chunk is how a run burns 20 minutes
+                # logging the same 404. Disable the LLM for the rest of the run.
+                if _is_fatal(e):
+                    self.stats.record(False, len(prompt), 0, time.time() - started)
+                    with self._lock:
+                        if self._available is not False:
+                            log.error(
+                                "LLM disabled for this run: %s. "
+                                "Falling back to extractive generation — fix the model "
+                                "in config.toml (`python -m datagen doctor`) and re-run.",
+                                e,
+                            )
+                        self._available = False
+                    return None
                 if attempt >= self.cfg.max_retries:
                     self.stats.record(False, len(prompt), 0, time.time() - started)
                     log.warning("LLM call failed after %d attempts: %s", attempt + 1, e)
@@ -286,6 +380,16 @@ class LocalLLM:
             return None
 
 
+_FATAL_HINTS = ("not found", "no such model", "unknown model", "does not exist")
+
+
+def _is_fatal(err: Exception) -> bool:
+    """True for errors that will recur identically on every subsequent call."""
+    if isinstance(err, HttpError) and err.status in (400, 401, 403, 404):
+        return True
+    return any(h in str(err).lower() for h in _FATAL_HINTS)
+
+
 def _human_gb(n: int) -> str:
     if not n:
         return ""
@@ -294,6 +398,25 @@ def _human_gb(n: int) -> str:
 
 
 _EMBED_HINTS = ("embed", "bge", "gte", "e5-", "minilm", "nomic-embed", "mxbai")
+
+# Substitution order when the configured model is missing. These prompts ask for
+# strict JSON, so a same-family instruct model is the closest stand-in; tiny and
+# vision models are last because they mangle the schema.
+_FAMILY_ORDER = ("qwen", "llama", "mistral", "mixtral", "gemma", "phi", "deepseek")
+_WEAK_HINTS = ("moondream", "llava", "vision", ":1b", ":2b", "tinyllama")
+
+
+def _family_rank(name: str, want: str) -> int:
+    low = name.lower()
+    if any(h in low for h in _WEAK_HINTS):
+        return 90
+    family = re.split(r"[:.\-]", want.lower())[0]
+    if family and family in low:
+        return 0
+    for i, fam in enumerate(_FAMILY_ORDER):
+        if fam in low:
+            return 1 + i
+    return 50
 
 
 def _looks_like_embedder(name: str, details: dict) -> bool:

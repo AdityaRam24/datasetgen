@@ -93,6 +93,9 @@ def fetch_url(url: str, timeout: float = 30.0, source: str = "web", tags: Iterab
     except HttpError as e:
         log.warning("fetch failed: %s", e)
         return None
+    except Exception as e:  # noqa: BLE001 - one broken link must not stop the crawl
+        log.warning("fetch failed: %s: %s <%s>", type(e).__name__, e, url)
+        return None
 
     ctype = resp.content_type
     kind = BINARY_KINDS.get(ctype, "html" if "html" in ctype or not ctype else None)
@@ -191,6 +194,9 @@ def crawl(
                 seen.add(link)
                 queue.append((link, depth + 1))
         except HttpError:
+            continue
+        except Exception as e:  # noqa: BLE001 - link extraction is best-effort
+            log.debug("link extraction failed for %s: %s", url, e)
             continue
 
     log.info("crawl finished: %d documents from %d seeds", len(docs), len(seeds))

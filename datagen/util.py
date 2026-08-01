@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import http.client
 import io
 import json
 import logging
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -295,6 +297,11 @@ def http_request(
     if isinstance(data, str):
         data = data.encode("utf-8")
 
+    url = _ascii_url(url)
+    host = urllib.parse.urlsplit(url).netloc.lower()
+    if _host_is_dead(host):
+        raise HttpError(url, 0, f"host {host} did not resolve earlier in this run — skipped")
+
     last: Exception | None = None
     for attempt in range(retries + 1):
         try:
@@ -323,14 +330,107 @@ def http_request(
                 pass
             # 4xx (except 429) will not improve on retry.
             if e.code < 500 and e.code != 429:
-                raise HttpError(url, e.code, body.decode("utf-8", "replace")[:300] or e.reason)
+                raise HttpError(url, e.code, _readable_body(body) or e.reason)
             last = e
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             last = e
+            if _is_dns_failure(e):
+                _mark_host_dead(host)
+                raise HttpError(url, 0, f"host {host} does not resolve") from e
+        except (UnicodeError, ValueError, http.client.HTTPException) as e:
+            # A malformed or un-encodable URL. Surface it as an HttpError so one
+            # bad link cannot abort a whole crawl.
+            raise HttpError(url, 0, f"{type(e).__name__}: {e}") from e
         if attempt < retries:
             time.sleep(backoff ** (attempt + 1))
 
     raise HttpError(url, 0, str(last))
+
+
+# A host that does not resolve will not resolve on the next of the 40 links
+# pointing at it. Each retry cycle costs ~20s, so remember the failure.
+_DEAD_HOSTS: dict[str, float] = {}
+_DEAD_HOST_TTL = 600.0
+_DEAD_LOCK = threading.Lock()
+_DNS_HINTS = ("getaddrinfo failed", "name or service not known", "nodename nor servname",
+              "temporary failure in name resolution", "no address associated")
+
+
+def _is_dns_failure(err: Exception) -> bool:
+    return any(h in str(err).lower() for h in _DNS_HINTS)
+
+
+def _mark_host_dead(host: str) -> None:
+    if not host:
+        return
+    with _DEAD_LOCK:
+        first = host not in _DEAD_HOSTS
+        _DEAD_HOSTS[host] = time.time()
+    if first:
+        log.warning("%s does not resolve — skipping every other URL on that host", host)
+
+
+def _host_is_dead(host: str) -> bool:
+    if not host:
+        return False
+    with _DEAD_LOCK:
+        seen = _DEAD_HOSTS.get(host)
+        if seen is None:
+            return False
+        if time.time() - seen > _DEAD_HOST_TTL:
+            del _DEAD_HOSTS[host]
+            return False
+        return True
+
+
+def _readable_body(body: bytes) -> str:
+    """Error bodies are often gzipped or binary. Dumping those raw into a log
+    line produces screenfuls of mojibake and can even crash a cp1252 console."""
+    if not body:
+        return ""
+    try:
+        text = body.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return ""
+    printable = sum(c.isprintable() or c.isspace() for c in text)
+    if not text or printable / len(text) < 0.9:
+        return ""
+    return " ".join(text.split())[:300]
+
+
+def _ascii_url(url: str) -> str:
+    """Percent-encode a URL that contains non-ASCII characters.
+
+    urllib requires an ASCII request line: a link with an em dash or an accented
+    character in the path (vendor blogs are full of them) otherwise raises
+    UnicodeEncodeError from deep inside http.client.
+    """
+    if url.isascii():
+        return url
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname or ""
+        try:
+            host = host.encode("idna").decode("ascii")
+        except (UnicodeError, ValueError):
+            host = urllib.parse.quote(host, safe="")
+        netloc = host
+        if parts.port:
+            netloc = f"{netloc}:{parts.port}"
+        if parts.username:
+            cred = urllib.parse.quote(parts.username, safe="")
+            if parts.password:
+                cred += ":" + urllib.parse.quote(parts.password, safe="")
+            netloc = f"{cred}@{netloc}"
+        return urllib.parse.urlunsplit((
+            parts.scheme,
+            netloc,
+            urllib.parse.quote(parts.path, safe="/%:@!$&'()*+,;="),
+            urllib.parse.quote(parts.query, safe="/%:@!$&'()*+,;=?"),
+            urllib.parse.quote(parts.fragment, safe="/%:@!$&'()*+,;=?"),
+        ))
+    except ValueError:
+        return url
 
 
 def http_json(url: str, **kw: Any) -> Any:
