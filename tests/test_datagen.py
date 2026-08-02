@@ -32,7 +32,7 @@ from datagen.connectors.search import (                           # noqa: E402
     SearchResult, rank_results, searxng_available,
 )
 from datagen.generators import (                                  # noqa: E402
-    _extractive_glossary, is_useful_term, system_prompt,
+    _extractive_glossary, _kinds_for, is_useful_term, system_prompt,
 )
 from datagen.learn import case_record, document_from_text, pair_record  # noqa: E402
 from datagen.models import Chunk, Document, Record, RunStats     # noqa: E402
@@ -432,6 +432,66 @@ class TestAgentStall(unittest.TestCase):
                 )
             finally:
                 state.close()
+
+
+class TestConfluenceRunbooks(unittest.TestCase):
+    """Runbooks living in the wiki should get the runbook treatment, not be
+    ingested as generic pages."""
+
+    PAGE = """## Symptom
+The MLIS endpoint returns 503 Service Unavailable for every request.
+
+## Cause
+The serving pod cannot pull its image.
+
+## Steps
+1. Run `kubectl get pods -n mlis` to confirm the pod state.
+2. Check the registry secret with `kubectl get secret regcred -n mlis`.
+3. Recreate the secret and restart the deployment.
+
+## Verification
+The endpoint returns 200 and a test inference succeeds.
+"""
+
+    def test_labels_and_titles_are_recognised(self):
+        from datagen.connectors.confluence import looks_like_runbook
+
+        self.assertTrue(looks_like_runbook("MLIS 503 runbook", []))
+        self.assertTrue(looks_like_runbook("Anything", ["runbook"]))
+        self.assertTrue(looks_like_runbook("Incident 2026-07: MLIS down", []))
+        self.assertTrue(looks_like_runbook("How to troubleshoot MLDM", []))
+        self.assertFalse(looks_like_runbook("PCAI architecture overview", ["design"]))
+
+    def test_a_structured_page_is_reparsed_as_a_runbook(self):
+        from datagen.connectors.confluence import as_runbook
+
+        out = as_runbook(self.PAGE, "MLIS endpoint 503")
+        self.assertIsNotNone(out)
+        self.assertIn("Runbook: MLIS endpoint 503", out)
+        # Ordered steps and commands survive — the reason runbooks get their own
+        # parser in the first place.
+        self.assertIn("kubectl get pods -n mlis", out)
+        self.assertLess(out.index("confirm the pod state"), out.index("Recreate the secret"))
+
+    def test_a_page_that_merely_mentions_incidents_is_left_alone(self):
+        from datagen.connectors.confluence import as_runbook
+
+        prose = ("Notes from the incident review meeting. Attendance was good and "
+                 "we agreed to revisit the topic next quarter. No actions were "
+                 "recorded against any team at this time.")
+        self.assertIsNone(as_runbook(prose, "Incident review meeting notes"))
+
+    def test_runbook_tag_reaches_the_troubleshooting_generator(self):
+        # The end of the chain: a wiki page tagged this way must take the
+        # procedural branch in _kinds_for.
+        chunk = Chunk.make(
+            Document.make(title="MLIS 503", url="https://wiki/x", text=self.PAGE,
+                          kind="runbook", source="wiki",
+                          tags=["confluence", "label:runbook", "runbook"]),
+            self.PAGE, 0, "",
+        )
+        kinds = _kinds_for(chunk, ["qa", "instruction", "troubleshooting", "glossary"])
+        self.assertEqual(kinds[0], "troubleshooting")
 
 
 class TestQuality(unittest.TestCase):

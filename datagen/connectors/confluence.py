@@ -25,6 +25,7 @@ from urllib.parse import quote, urlparse
 from ..models import Document
 from ..util import HttpError, clean_text, get_logger, http_request
 from .parsers import EXTENSION_MAP, parse_bytes, parse_html
+from .runbooks import normalize, parse_runbook
 
 log = get_logger("confluence")
 
@@ -196,6 +197,39 @@ def build_cql(block: dict, spaces: list[str] | None = None, text_terms: list[str
     return " AND ".join(parts) + " ORDER BY lastmodified DESC"
 
 
+# A wiki is where runbooks actually live, and they arrive here as ordinary
+# pages: kind "confluence", tagged "label:runbook" rather than "runbook". That
+# misses the procedural path in _kinds_for entirely, so the pages most likely to
+# contain a real diagnosis get generated as general Q&A — on a dataset whose
+# whole point is diagnosing errors.
+_RUNBOOK_WORDS = re.compile(
+    r"\b(runbook|run-book|playbook|incident|postmortem|post-mortem|troubleshoot\w*|"
+    r"remediation|recovery|escalation|sop|standard operating procedure)\b",
+    re.I,
+)
+
+
+def looks_like_runbook(title: str, labels: list[str]) -> bool:
+    if any(_RUNBOOK_WORDS.search(l or "") for l in labels):
+        return True
+    return bool(_RUNBOOK_WORDS.search(title or ""))
+
+
+def as_runbook(text: str, title: str) -> str | None:
+    """Re-render a wiki page through the runbook parser, or None if it has no
+    runbook structure to find.
+
+    The title check alone is not enough — "Incident review meeting notes" would
+    match it — so the parse has to recognise real sections (symptom, cause,
+    steps, verification) before its output is used.
+    """
+    parsed = parse_runbook(text, title)
+    recognised = [k for k in parsed if k not in ("body", "steps", "commands", "title")]
+    if not recognised and not parsed.get("steps"):
+        return None
+    return normalize(parsed, title)
+
+
 def _resolve_cql(client: ConfluenceClient, block: dict, name: str, terms: list[str]) -> str:
     """Pick a CQL query that will actually match something.
 
@@ -281,18 +315,32 @@ def fetch(cfg: Any, block: dict, state: Any = None) -> list[Document]:
         webui = ((item.get("_links") or {}).get("webui")) or f"/pages/{page_id}"
 
         if len(text) >= 200:
+            kind = "confluence"
+            page_tags = tags + [f"space:{space}"] + [f"label:{l}" for l in labels if l]
+
+            # Pages that are runbooks get parsed as runbooks: ordered steps and
+            # commands preserved, and tagged so troubleshooting generation is
+            # prioritised for them.
+            if looks_like_runbook(title, labels):
+                structured = as_runbook(text, title)
+                if structured:
+                    text, kind = structured, "runbook"
+                    page_tags = page_tags + ["runbook"]
+
             docs.append(
                 Document.make(
                     title=title,
                     url=f"{client.base_url}{webui}",
                     text=text,
-                    kind="confluence",
+                    kind=kind,
                     source=name,
-                    tags=tags + [f"space:{space}"] + [f"label:{l}" for l in labels if l],
-                    meta={"page_id": page_id, "space": space, "version": version, "labels": labels},
+                    tags=page_tags,
+                    meta={"page_id": page_id, "space": space, "version": version,
+                          "labels": labels, "parsed_as_runbook": kind == "runbook"},
                 )
             )
-            log.info("  + %s (v%s, %s)", title[:60], version, space)
+            log.info("  + %s (v%s, %s)%s", title[:60], version, space,
+                     "  [runbook]" if kind == "runbook" else "")
         else:
             log.debug("  skipped short page: %s", title)
 

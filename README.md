@@ -422,6 +422,15 @@ cql         = ""                     # raw CQL overrides both
 That fallback is what makes it useful on a wiki you have access to but have not
 catalogued. Set `spaces` properly once you know the keys — it is cheaper and more precise.
 
+**Wiki runbooks are parsed as runbooks.** A page whose title or Confluence labels say
+runbook / incident / postmortem / troubleshooting is re-rendered through the runbook parser
+rather than ingested as prose, so ordered steps and commands survive and troubleshooting
+generation is prioritised for it. Without that, a page labelled `runbook` arrives tagged
+`label:runbook` — which is not the same as `runbook` — and the pages most likely to contain
+a real diagnosis get generated as general Q&A. The parse has to find actual structure
+(symptom, cause, steps, verification) before it is used, so "Incident review meeting notes"
+is left alone. Look for `[runbook]` beside the page in the log.
+
 **`[[sources.web]]`** — breadth-first crawl with a domain allow-list, deny patterns,
 robots.txt, per-host delay, and hard caps on pages/depth/size. Linked PDFs are parsed,
 not skipped.
