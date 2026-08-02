@@ -57,20 +57,34 @@ def cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
     print("\nLOCAL LLM  (nothing is sent to a cloud provider)")
     print(f"  provider     {cfg.llm.provider}")
     print(f"  base_url     {cfg.llm.base_url}  {'[local]' if cfg.llm.is_local else '[NOT LOCAL]'}")
-    print(f"  model        {cfg.llm.model}")
-    print(f"  embed model  {cfg.llm.embed_model} ({'on' if cfg.llm.embed_enabled else 'off'})")
-    print(f"  vision model {cfg.llm.vision_model} "
+
+    # Probe BEFORE printing the model names. available() substitutes anything
+    # that is missing or not capable, and the whole point of doctor is to show
+    # what the next run will really use — not what the file asked for.
+    configured = (cfg.llm.model, cfg.llm.embed_model, cfg.llm.vision_model)
+    reachable = llm.available(recheck=True)
+
+    def _resolved(now: str, before: str) -> str:
+        return now if now == before else f"{now}  (config says {before!r})"
+
+    print(f"  model        {_resolved(cfg.llm.model, configured[0])}")
+    print(f"  embed model  {_resolved(cfg.llm.embed_model, configured[1])} "
+          f"({'on' if cfg.llm.embed_enabled else 'off'})")
+    print(f"  vision model {_resolved(cfg.llm.vision_model, configured[2])} "
           f"({'on — images are described' if cfg.llm.vision_enabled else 'off — images skipped'})")
-    if llm.available(recheck=True):
+
+    if reachable:
         installed = llm.installed_models()
         print(f"  status       reachable, {len(installed)} models installed")
         for m in installed[:12]:
-            marker = "  <- generation" if m.startswith(cfg.llm.model.split(":")[0]) else ""
-            if cfg.llm.vision_enabled and m.startswith(cfg.llm.vision_model.split(":")[0]):
+            # Exact matches only: a prefix test marks gemma4:31b as the image
+            # model when gemma4:latest is the one that will actually be used.
+            marker = "  <- generation" if m == cfg.llm.model else ""
+            if cfg.llm.vision_enabled and m == cfg.llm.vision_model:
                 marker = "  <- images"
+            elif cfg.llm.embed_enabled and m == cfg.llm.embed_model:
+                marker = "  <- embeddings"
             print(f"                 {m}{marker}")
-        # available() resolves a missing model to an installed one, so report
-        # what will actually be used rather than what the file asked for.
         if cfg.llm.model not in installed and installed:
             print(f"  WARNING      {cfg.llm.model!r} is not installed. "
                   f"Run: ollama pull {cfg.llm.model}")
