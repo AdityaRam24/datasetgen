@@ -33,6 +33,12 @@ from . import tools as T
 
 log = get_logger("agent")
 
+# Consecutive steps that may produce nothing before the run is called stalled.
+# Reconnaissance steps (search_web, assess_coverage) never gather by design, so
+# this has to leave room for a couple of them in a row followed by the scrape
+# that pays off.
+STALL_LIMIT = 5
+
 PLANNER_SYSTEM = """You are the controller of an autonomous dataset-building agent.
 You gather technical material from the web, local documents, runbooks and
 Confluence, then turn it into a training dataset using a LOCAL language model.
@@ -229,50 +235,60 @@ class Agent:
             thought, tool, args = action
 
             # Repeat detector: same tool + same args is always a wasted step.
+            # NB it must not `continue` past the stall check below — a planner
+            # that proposes one identical call over and over is the clearest
+            # stall there is, and skipping the check let exactly that burn a
+            # whole 24-step budget on 22 skipped search_web calls.
             signature = f"{tool}:{json.dumps(args, sort_keys=True, default=str)}"
-            if signature in attempted and tool not in ("assess_coverage", "finish"):
+            repeated = signature in attempted and tool not in ("assess_coverage", "finish")
+
+            if repeated:
                 log.info("[%d] skipping repeat call %s", n, tool)
                 run.steps.append(
                     Step(n, thought, tool, args,
                          {"ok": False, "error": "this exact call was already made; choose a different action"},
                          False)
                 )
-                continue
-            attempted.add(signature)
-
-            log.info("[%d/%d] %s → %s", n, budget, truncate(thought, 90) or "(no thought)", tool)
-            result = T.call(ctx, tool, args)
-            ok = bool(result.get("ok"))
-            run.steps.append(Step(n, thought, tool, args, result, ok))
-
-            if ok:
-                errors = 0
-                log.info("      ✓ %s", truncate(json.dumps(
-                    {k: v for k, v in result.items() if k not in ("ok", "manifest")},
-                    default=str), 160))
             else:
-                errors += 1
-                log.warning("      ✗ %s", result.get("error", "failed"))
-                if errors >= cfg.agent.max_tool_errors:
-                    log.error("too many consecutive tool failures — stopping")
-                    break
+                attempted.add(signature)
 
-            if result.get("done"):
-                run.finished = True
-                run.summary = result.get("summary", "")
-                break
+                log.info("[%d/%d] %s → %s", n, budget, truncate(thought, 90) or "(no thought)", tool)
+                result = T.call(ctx, tool, args)
+                ok = bool(result.get("ok"))
+                run.steps.append(Step(n, thought, tool, args, result, ok))
+
+                if ok:
+                    errors = 0
+                    log.info("      ✓ %s", truncate(json.dumps(
+                        {k: v for k, v in result.items() if k not in ("ok", "manifest")},
+                        default=str), 160))
+                else:
+                    errors += 1
+                    log.warning("      ✗ %s", result.get("error", "failed"))
+                    if errors >= cfg.agent.max_tool_errors:
+                        log.error("too many consecutive tool failures — stopping")
+                        break
+
+                if result.get("done"):
+                    run.finished = True
+                    run.summary = result.get("summary", "")
+                    break
 
             # Stall detector. The repeat detector only catches an *identical*
             # call, and assess_coverage is exempt from it because coverage
             # genuinely changes as material arrives — so a planner that keeps
             # reassessing an unchanged dataset sails past both. Observed
-            # spending the last third of a budget that way. Progress means new
-            # documents, chunks or records; three steps without any is a loop,
-            # not deliberation.
+            # spending the last third of a budget that way.
+            #
+            # The limit is not tighter because searching and assessing never
+            # gather anything by definition: `search → assess → search → scrape`
+            # is a normal, productive rhythm, and a limit of 3 cut a real run off
+            # at the search that had just surfaced a new URL. Only the scrape
+            # would have shown whether it was worth anything.
             progress = (len(ctx.documents), len(ctx.chunks), len(ctx.records))
             if progress == last_progress:
                 stalled += 1
-                if stalled >= 3:
+                if stalled >= STALL_LIMIT:
                     log.info(
                         "no new documents, chunks or records in %d steps — "
                         "finishing instead of burning the remaining budget", stalled

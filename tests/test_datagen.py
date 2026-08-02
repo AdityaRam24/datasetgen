@@ -386,9 +386,50 @@ class TestAgentStall(unittest.TestCase):
                 finally:
                     agent_loop.LLMPlanner, agent_loop.HeuristicPlanner = real
 
-                # 3 stalled steps after the first, not the full 20-step budget.
-                self.assertLess(len(run.steps), 8, f"loop ran {len(run.steps)} steps")
+                # Stops on the stall limit, not at the 20-step budget.
+                self.assertLess(len(run.steps), 10, f"loop ran {len(run.steps)} steps")
                 self.assertIn("progress", (run.summary or "").lower())
+            finally:
+                state.close()
+
+    def test_repeated_identical_calls_also_count_as_a_stall(self):
+        """The repeat detector used to `continue` past the stall check, so a
+        planner proposing one identical call burned the whole budget."""
+        from datagen.agent import loop as agent_loop
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = load_config(None)
+            cfg.root = Path(tmp)
+            cfg.data_dir = Path(tmp) / "data"
+            cfg.llm.provider = "none"
+            cfg.llm.vision_enabled = False
+            cfg.agent.max_steps = 24
+            cfg.ensure_dirs()
+
+            state = StateStore(cfg.state_db)
+            try:
+                from datagen.llm import LocalLLM
+
+                agent = agent_loop.Agent(cfg, state, LocalLLM(cfg.llm))
+
+                class Repeats:
+                    consecutive_bad = 0
+
+                    def next_action(self, run, ctx):
+                        return ("search once more", "search_web", {"query": "same query"})
+
+                real = (agent_loop.LLMPlanner, agent_loop.HeuristicPlanner)
+                agent_loop.LLMPlanner = lambda *a, **k: Repeats()      # type: ignore[assignment]
+                agent_loop.HeuristicPlanner = lambda *a, **k: Repeats()  # type: ignore[assignment]
+                try:
+                    run = agent.run()
+                finally:
+                    agent_loop.LLMPlanner, agent_loop.HeuristicPlanner = real
+
+                self.assertLess(
+                    len(run.steps), 12,
+                    f"repeated calls burned {len(run.steps)} of 24 steps",
+                )
             finally:
                 state.close()
 
