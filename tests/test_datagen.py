@@ -346,6 +346,53 @@ class TestCheckpoints(unittest.TestCase):
                 state.close()
 
 
+class TestAgentStall(unittest.TestCase):
+    """A planner that keeps calling assess_coverage on an unchanged dataset gets
+    past the repeat detector (assess_coverage is exempt from it), so the loop
+    needs its own notion of progress."""
+
+    def test_the_loop_stops_when_nothing_new_arrives(self):
+        from datagen.agent import loop as agent_loop
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = load_config(None)
+            cfg.root = Path(tmp)
+            cfg.data_dir = Path(tmp) / "data"
+            cfg.llm.provider = "none"
+            cfg.llm.vision_enabled = False
+            cfg.agent.max_steps = 20
+            cfg.ensure_dirs()
+
+            state = StateStore(cfg.state_db)
+            try:
+                from datagen.llm import LocalLLM
+
+                agent = agent_loop.Agent(cfg, state, LocalLLM(cfg.llm))
+
+                # A planner that only ever reassesses — the exact loop observed.
+                class Stuck:
+                    consecutive_bad = 0
+
+                    def next_action(self, run, ctx):
+                        return ("assess again", "assess_coverage", {})
+
+                # Restore the real planners afterwards: leaving these patched
+                # would silently break any later test that runs the agent.
+                real = (agent_loop.LLMPlanner, agent_loop.HeuristicPlanner)
+                agent_loop.LLMPlanner = lambda *a, **k: Stuck()      # type: ignore[assignment]
+                agent_loop.HeuristicPlanner = lambda *a, **k: Stuck()  # type: ignore[assignment]
+                try:
+                    run = agent.run()
+                finally:
+                    agent_loop.LLMPlanner, agent_loop.HeuristicPlanner = real
+
+                # 3 stalled steps after the first, not the full 20-step budget.
+                self.assertLess(len(run.steps), 8, f"loop ran {len(run.steps)} steps")
+                self.assertIn("progress", (run.summary or "").lower())
+            finally:
+                state.close()
+
+
 class TestQuality(unittest.TestCase):
     cfg = QualityConfig()
 

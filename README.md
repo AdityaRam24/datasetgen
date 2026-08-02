@@ -263,6 +263,12 @@ consecutive-error budget, a repeat detector that blocks identical calls, and a
 The heuristic planner drives the same tools in a fixed sensible order, so
 `agent` still works with no model at all.
 
+There is also a **stall detector**: three consecutive steps that produce no new documents,
+chunks or records end the run. The repeat detector only catches an *identical* call, and
+`assess_coverage` is deliberately exempt from it (coverage really does change as material
+arrives) — so a planner reassessing an unchanged dataset slips past both. One run spent
+its last third doing exactly that.
+
 `assess_coverage` also reports `documents_awaiting_generation`. Without it the planner
 falls into a loop it cannot see: coverage looks thin, so it gathers more, reassesses, and
 reads "thin" again — because coverage *cannot* improve until `build_dataset` runs. Observed

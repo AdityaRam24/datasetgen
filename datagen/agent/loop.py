@@ -213,6 +213,8 @@ class Agent:
 
         errors = 0
         attempted: set[str] = set()
+        last_progress: tuple[int, int, int] | None = None
+        stalled = 0
 
         for n in range(1, budget + 1):
             action = planner.next_action(run, ctx)
@@ -259,6 +261,27 @@ class Agent:
                 run.finished = True
                 run.summary = result.get("summary", "")
                 break
+
+            # Stall detector. The repeat detector only catches an *identical*
+            # call, and assess_coverage is exempt from it because coverage
+            # genuinely changes as material arrives — so a planner that keeps
+            # reassessing an unchanged dataset sails past both. Observed
+            # spending the last third of a budget that way. Progress means new
+            # documents, chunks or records; three steps without any is a loop,
+            # not deliberation.
+            progress = (len(ctx.documents), len(ctx.chunks), len(ctx.records))
+            if progress == last_progress:
+                stalled += 1
+                if stalled >= 3:
+                    log.info(
+                        "no new documents, chunks or records in %d steps — "
+                        "finishing instead of burning the remaining budget", stalled
+                    )
+                    run.summary = "stopped early: the plan stopped making progress"
+                    break
+            else:
+                stalled = 0
+                last_progress = progress
         else:
             log.info("step budget exhausted")
 
