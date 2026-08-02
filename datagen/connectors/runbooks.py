@@ -133,6 +133,35 @@ def normalize(parsed: dict[str, Any], title: str) -> str:
     return clean_text("\n".join(lines))
 
 
+def runbook_from_file(path: Any, source: str, tags: list[str], url: str = "") -> Document | None:
+    """Read one file and parse it structurally as a runbook.
+
+    Split out of fetch() because `datagen ingest one-incident.md --runbook` used
+    to only *tag* the file — the structural parse ran solely for directories, so
+    the single-file case, which is the obvious way to hand over one write-up,
+    quietly produced flat prose.
+    """
+    raw = read_file(path, source, tags)
+    if not raw:
+        return None
+    parsed = parse_runbook(raw.text, raw.title)
+    return Document.make(
+        title=raw.title,
+        url=url or f"runbook://{Path(path).name}",
+        text=normalize(parsed, raw.title),
+        kind="runbook",
+        source=source,
+        tags=tags,
+        meta={
+            "path": str(path),
+            "steps": len(parsed.get("steps", [])),
+            "commands": parsed.get("commands", [])[:20],
+            "has_symptom": bool(parsed.get("symptom")),
+            "has_rollback": bool(parsed.get("rollback")),
+        },
+    )
+
+
 def fetch(cfg: Any, block: dict, state: Any = None) -> list[Document]:
     name = block.get("name", "runbooks")
     root = cfg.resolve(block.get("path", "corpus/runbooks"))

@@ -99,10 +99,13 @@ class QualityConfig:
     require_grounded: bool = True
     max_answer_chars: int = 2000
     min_question_chars: int = 12
-    # "Which auth broker does PCAI use?" -> "Keycloak" is a perfect record. A
-    # high floor here silently deletes exactly the crisp factual lookups an ops
-    # assistant is asked for; grounding and the judge still police short answers.
-    min_answer_chars: int = 12
+    # Deliberately almost zero. "Which auth broker does PCAI use?" -> "Keycloak"
+    # is a perfect record at 8 characters, and "DL380" is 5 — a length floor
+    # cannot tell those from junk, it just deletes the crispest lookups in the
+    # set. What actually separates them is grounding: a short answer lifted from
+    # the source scores 1.0, while "N/A" and "unknown" are caught by the
+    # non-answer patterns. So this only rejects the genuinely empty.
+    min_answer_chars: int = 2
 
 
 @dataclass
@@ -261,7 +264,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
             require_grounded=bool(_get(raw, "quality.require_grounded", True)),
             max_answer_chars=int(_get(raw, "quality.max_answer_chars", 2000)),
             min_question_chars=int(_get(raw, "quality.min_question_chars", 12)),
-            min_answer_chars=int(_get(raw, "quality.min_answer_chars", 12)),
+            min_answer_chars=int(_get(raw, "quality.min_answer_chars", 2)),
         ),
         agent=AgentConfig(
             enabled=bool(_get(raw, "agent.enabled", True)),

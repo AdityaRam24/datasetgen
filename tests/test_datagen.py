@@ -253,6 +253,57 @@ class TestImages(unittest.TestCase):
         self.assertIn("503", chunks[0].text)
 
 
+class TestUploadAllowlist(unittest.TestCase):
+    """The UI allowlist and the parser map drifted apart once already: image
+    support was added to the pipeline and the UI went on refusing .png."""
+
+    def test_everything_accepted_can_actually_be_parsed(self):
+        from datagen.web import ALLOWED_UPLOAD_EXT
+
+        unreadable = ALLOWED_UPLOAD_EXT - set(parsers_mod.EXTENSION_MAP)
+        self.assertFalse(unreadable, f"upload accepts types nothing can parse: {unreadable}")
+
+    def test_images_can_be_uploaded(self):
+        from datagen.web import ALLOWED_UPLOAD_EXT
+
+        for ext in (".png", ".jpg", ".jpeg", ".webp"):
+            self.assertIn(ext, ALLOWED_UPLOAD_EXT, ext)
+
+    def test_executables_are_still_refused(self):
+        from datagen.web import ALLOWED_UPLOAD_EXT
+
+        for ext in (".exe", ".sh", ".bat", ".ps1", ".dll", ".py"):
+            self.assertNotIn(ext, ALLOWED_UPLOAD_EXT, ext)
+
+
+class TestShortAnswers(unittest.TestCase):
+    """A length floor cannot tell a crisp lookup from junk. Grounding can."""
+
+    SOURCE = ("The PCAI auth broker is Keycloak. The inference node worker is a "
+              "DL380. The endpoint listens on 8443.")
+
+    def _record(self, question, answer):
+        doc = Document.make(title="t", url="file:///t.md", text=self.SOURCE,
+                            kind="markdown", source="s")
+        return Record.make("qa", question, answer, Chunk.make(doc, self.SOURCE, 0, ""),
+                           generator="test")
+
+    def test_short_grounded_answers_are_kept(self):
+        cfg = QualityConfig()
+        for answer in ("Keycloak", "DL380", "8443"):
+            rec = self._record("Which one is it?", answer)
+            verdict = heuristic_check(rec, cfg)
+            self.assertTrue(verdict.ok, f"{answer!r} rejected: {verdict.reason}")
+            self.assertGreaterEqual(grounding_score(rec), 0.35, answer)
+
+    def test_short_ungrounded_or_meta_answers_are_not(self):
+        cfg = QualityConfig()
+        # A non-answer, caught by the meta patterns rather than by length.
+        self.assertFalse(heuristic_check(self._record("What is the fix?", "N/A"), cfg).ok)
+        # Plausible but absent from the source — grounding catches it.
+        self.assertLess(grounding_score(self._record("What is it?", "Kubernetes")), 0.35)
+
+
 class TestCheckpoints(unittest.TestCase):
     """Generation writes every `checkpoint_every` chunks, so an interrupted run
     keeps the completed batches instead of losing hours of work."""

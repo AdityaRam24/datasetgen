@@ -33,11 +33,21 @@ log = get_logger("cli")
 
 
 def _banner(cfg: Config, llm: LocalLLM) -> None:
-    ok = llm.available()
-    mark = "✓" if ok else "✗"
     print(f"\n  datagen {__version__} — dataset: {cfg.name}")
-    print(f"  local model  {mark} {cfg.llm.model} via {cfg.llm.provider} @ {cfg.llm.base_url}")
-    if not ok and cfg.llm.provider != "none":
+
+    # provider = "none" is a deliberate extractive-only setup, not a failure.
+    # Printing "✗ qwen2.5:7b-instruct via none @ localhost" named a model that
+    # was never going to be called and read like something was broken.
+    if cfg.llm.provider == "none":
+        print("  local model  — none configured; generating extractively")
+        print()
+        return
+
+    ok = llm.available()
+    # available() substitutes a missing model, so report what will be used.
+    print(f"  local model  {'✓' if ok else '✗'} {cfg.llm.model} "
+          f"via {cfg.llm.provider} @ {cfg.llm.base_url}")
+    if not ok:
         print("     (not reachable — start it with `ollama serve`; running extractive-only)")
     print()
 
@@ -199,11 +209,23 @@ def _generate_and_persist(cfg: Config, llm: LocalLLM, docs: list) -> int:
             print("\n  nothing new — everything gathered is already in the dataset\n")
             return 0
 
-        records = generate_all(chunks, llm, cfg, stats)
-        accepted, quarantined = evaluate(records, llm, cfg.quality)
-        all_records = pipeline.persist(chunks, accepted, quarantined)
-        export_all(cfg, all_records, None)
-        print(f"\n  {len(accepted)} records generated, {len(quarantined)} quarantined")
+        records, accepted = pipeline.generate_in_batches(chunks, stats)
+        quarantined = stats.records_quarantined
+        export_all(cfg, records, None)
+        print(f"\n  {len(accepted)} records generated, {quarantined} quarantined")
+
+        # "0 records" with no explanation is the worst possible answer to
+        # someone who just typed a note in. Say which of the two reasons it was.
+        if not accepted:
+            if not llm.available():
+                print("  Nothing was generated: there is no local model running, and the "
+                      "\n  extractive fallback needs a longer passage to work from."
+                      "\n  Start Ollama, or state it directly:"
+                      "\n    datagen learn -q \"<question>\" -a \"<answer>\"")
+            else:
+                print("  Nothing was generated: the model found no self-contained "
+                      "\n  question in this text, or the quality gate rejected what it "
+                      "\n  wrote. See: datagen inspect --rejected")
         print(f"  exports written to {cfg.export_dir}\n")
         return len(accepted)
 
@@ -255,7 +277,15 @@ def cmd_ingest(args: argparse.Namespace, cfg: Config) -> int:
 
     tags = ["cli", "runbook"] if args.runbook else ["cli"]
     if path.is_file():
-        docs = [d for d in [read_file(path, "cli:ingest", tags)] if d]
+        # --runbook has to parse the file structurally, not just label it —
+        # otherwise the single-file case silently loses the step ordering that
+        # is the whole reason runbooks have their own connector.
+        if args.runbook:
+            from .connectors.runbooks import runbook_from_file
+
+            docs = [d for d in [runbook_from_file(path, "cli:ingest", tags)] if d]
+        else:
+            docs = [d for d in [read_file(path, "cli:ingest", tags)] if d]
     elif args.runbook:
         docs = fetch_runbooks(cfg, {"name": "cli:runbooks", "path": str(path), "tags": tags})
     else:

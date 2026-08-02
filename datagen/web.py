@@ -44,10 +44,14 @@ log = get_logger("web")
 
 UI_DIR = Path(__file__).resolve().parent / "webui"
 
-# Uploads: what we will accept, and how much of it.
+# Uploads: what we will accept, and how much of it. Deliberately an allowlist —
+# it must stay in step with EXTENSION_MAP, or the UI refuses files the pipeline
+# would happily read. Images are here because a vision model describes them
+# ([llm.vision]); dragging a screenshot in is the obvious way to hand one over.
 ALLOWED_UPLOAD_EXT = {
     ".pdf", ".docx", ".pptx", ".xlsx", ".md", ".markdown", ".txt",
     ".html", ".htm", ".csv", ".json", ".log", ".rst", ".yaml", ".yml",
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
 }
 MAX_UPLOAD_BYTES = 80 * 1024 * 1024
 MAX_BODY_BYTES = 120 * 1024 * 1024      # base64 inflates by ~33%
@@ -621,9 +625,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not chunks:
                     log.info("everything scraped was already in the dataset")
                     return
-                records = generate_all(chunks, llm, cfg, stats)
-                accepted, quarantined = evaluate(records, llm, cfg.quality)
-                all_records = pipeline.persist(chunks, accepted, quarantined)
+                # Checkpointed, like every other generation path: a long
+                # scrape started from the UI must survive the server stopping.
+                all_records, _ = pipeline.generate_in_batches(chunks, stats)
                 export_all(cfg, all_records, None)
 
         return job
@@ -726,9 +730,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not chunks:
                         log.info("that input is already in the dataset")
                         return
-                    records = generate_all(chunks, llm, cfg, stats)
-                    accepted, quarantined = evaluate(records, llm, cfg.quality)
-                    all_records = pipeline.persist(chunks, accepted, quarantined)
+                    all_records, _ = pipeline.generate_in_batches(chunks, stats)
                     export_all(cfg, all_records, None)
 
             ok, msg = self.jobs.start("learn", job)

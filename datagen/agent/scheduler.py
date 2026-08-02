@@ -106,7 +106,10 @@ class Scheduler:
 
     def _cycle(self, state: StateStore, full: bool) -> None:
         llm = LocalLLM(self.cfg.llm)
-        if not llm.available(recheck=True):
+        # `provider = "none"` is a deliberate choice to run extractive-only, not
+        # a broken daemon. Skipping those cycles turned watch into a permanent
+        # no-op for anyone who had made that choice.
+        if llm.enabled and not llm.available(recheck=True):
             # Deliberately do NOT fall back to extractive generation here. An
             # unattended loop that keeps running while the model is down fills
             # the dataset with sliced-up source text that then has to be found

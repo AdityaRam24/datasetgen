@@ -409,6 +409,9 @@ def parse_bytes(data: bytes, kind: str, url: str = "") -> tuple[str, str]:
         return "", parse_xlsx(data)
     if kind == "html":
         return parse_html(data, url)
+    if kind in ("markdown", "text"):
+        text = clean_text(data.decode("utf-8", "replace"))
+        return markdown_title(text), text
     if kind == "csv":
         return "", _parse_csv(data)
     if kind == "json":
@@ -457,6 +460,31 @@ def parse_image(data: bytes, url: str = "") -> str:
     except Exception as e:  # noqa: BLE001 - a vision failure must not stop a build
         log.warning("image description failed for %s: %s", url or "<bytes>", e)
         return ""
+
+
+_ATX = re.compile(r"^\s{0,3}#{1,2}\s+(\S.*?)\s*#*\s*$")
+_SETEXT = re.compile(r"^\s{0,3}[=-]{3,}\s*$")
+
+
+def markdown_title(text: str) -> str:
+    """First heading of a markdown/text document, or "".
+
+    Without this a runbook whose first line is `# MLIS endpoint returns 503` is
+    titled "mlis" after its filename — and that title is what ends up in every
+    citation, every glossary source list and the Kalam knowledge base.
+    """
+    lines = text.split("\n", 40)[:40]
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        m = _ATX.match(line)
+        if m:
+            return clean_text(m.group(1))[:200]
+        # Setext: a line of === or --- directly underneath the title.
+        if i + 1 < len(lines) and _SETEXT.match(lines[i + 1]) and len(line.strip()) <= 200:
+            return clean_text(line)[:200]
+        break        # a non-heading first line means there is no title to take
+    return ""
 
 
 def _parse_csv(data: bytes) -> str:
