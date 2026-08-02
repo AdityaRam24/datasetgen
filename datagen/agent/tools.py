@@ -331,7 +331,7 @@ def _build_dataset(ctx: ToolContext, args: dict) -> dict:
     # checkpoint. generate_in_batches updates stats itself, so the counts for
     # this call come from the difference rather than being added again.
     rejected_before = ctx.stats.records_quarantined
-    _, accepted = pipeline.generate_in_batches(chunks, ctx.stats)
+    accepted = pipeline.generate_in_batches(chunks, ctx.stats)
     quarantined = ctx.stats.records_quarantined - rejected_before
 
     ctx.chunks.extend(chunks)

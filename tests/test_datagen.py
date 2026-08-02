@@ -361,6 +361,39 @@ class TestCheckpoints(unittest.TestCase):
             self.assertEqual(sum(writes), len(chunks))
             self.assertTrue(all(w <= 2 for w in writes), writes)
 
+    def test_persist_appends_and_never_duplicates(self):
+        """persist used to read back and rewrite the whole record file, which
+        cost O(records so far) per checkpoint — 0.9s and ~100MB at 50k records,
+        every 25 chunks. It appends now, so this guards both the growth and the
+        de-duplication that the rewrite used to provide."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pipe, cfg, state = self._pipeline(tmp, every=25)
+            try:
+                chunks = self._chunks(2)
+                first = [
+                    Record.make("qa", f"Question {i}?", f"Answer {i} with enough text.",
+                                chunks[0], generator="t")
+                    for i in range(30)
+                ]
+                pipe.persist(chunks[:1], first, [])
+                after_first = cfg.records_path.read_text(encoding="utf-8").count("\n")
+                self.assertEqual(after_first, 30)
+
+                # Same records again: appended file, no new lines.
+                self.assertEqual(pipe.persist(chunks[:1], first, []), [])
+                self.assertEqual(cfg.records_path.read_text(encoding="utf-8").count("\n"), 30)
+
+                # New ones extend it by exactly their own count.
+                more = [
+                    Record.make("qa", f"Later question {i}?", f"Later answer {i} text.",
+                                chunks[1], generator="t")
+                    for i in range(10)
+                ]
+                self.assertEqual(len(pipe.persist(chunks[1:], more, [])), 10)
+                self.assertEqual(cfg.records_path.read_text(encoding="utf-8").count("\n"), 40)
+            finally:
+                state.close()
+
     def test_an_interrupt_keeps_the_completed_checkpoints(self):
         with tempfile.TemporaryDirectory() as tmp:
             pipe, cfg, state = self._pipeline(tmp, every=2)

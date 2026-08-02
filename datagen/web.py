@@ -627,8 +627,8 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 # Checkpointed, like every other generation path: a long
                 # scrape started from the UI must survive the server stopping.
-                all_records, _ = pipeline.generate_in_batches(chunks, stats)
-                export_all(cfg, all_records, None)
+                pipeline.generate_in_batches(chunks, stats)
+                export_all(cfg)
 
         return job
 
@@ -730,8 +730,8 @@ class Handler(BaseHTTPRequestHandler):
                     if not chunks:
                         log.info("that input is already in the dataset")
                         return
-                    all_records, _ = pipeline.generate_in_batches(chunks, stats)
-                    export_all(cfg, all_records, None)
+                    pipeline.generate_in_batches(chunks, stats)
+                    export_all(cfg)
 
             ok, msg = self.jobs.start("learn", job)
             return {"ok": ok, "message": msg, "async": True}

@@ -209,9 +209,9 @@ def _generate_and_persist(cfg: Config, llm: LocalLLM, docs: list) -> int:
             print("\n  nothing new — everything gathered is already in the dataset\n")
             return 0
 
-        records, accepted = pipeline.generate_in_batches(chunks, stats)
+        accepted = pipeline.generate_in_batches(chunks, stats)
         quarantined = stats.records_quarantined
-        export_all(cfg, records, None)
+        export_all(cfg)
         print(f"\n  {len(accepted)} records generated, {quarantined} quarantined")
 
         # "0 records" with no explanation is the worst possible answer to
@@ -337,8 +337,8 @@ def cmd_learn(args: argparse.Namespace, cfg: Config) -> int:
         with StateStore(cfg.state_db) as state:
             pipeline = Pipeline(cfg, state, llm)
             chunk = _chunk_from_record(rec)
-            all_records = pipeline.persist([chunk], [rec], [])
-            export_all(cfg, all_records, None)
+            pipeline.persist([chunk], [rec], [])
+            export_all(cfg)
         print(f"\n  learned 1 {rec.kind} record (human-authored, not judged)")
         print(f"  Q: {truncate(rec.instruction, 100)}")
         print(f"  A: {truncate(rec.output, 100)}\n")

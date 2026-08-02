@@ -180,14 +180,21 @@ class Pipeline:
         CLI one-shot commands and the agent — so `datagen export` always sees
         the complete dataset regardless of how it was built.
 
-        Returns every record now on disk (existing + newly added).
+        Returns the records this call actually added.
+
+        Append-only on purpose. Reading the whole of records.jsonl back and
+        rewriting it made every checkpoint cost O(records so far) in both time
+        and memory — 0.9s and ~100MB at 50k records, ~9s and ~1GB at 500k, once
+        per checkpoint. Record ids are content-derived and already in the state
+        database, so that is where "have I seen this?" is answered.
         """
-        existing = [] if full else self._load_existing_records()
-        known = {r.id for r in existing}
-        fresh = [r for r in accepted if r.id not in known]
+        if full:
+            # A full rebuild starts the file over; state was cleared with it.
+            self._append_jsonl(self.cfg.records_path, [], replace=True)
+        fresh = [r for r in accepted if not self.state.record_exists(r.id)]
 
         self._append_jsonl(
-            self.cfg.records_path, [r.to_dict() for r in existing + fresh], replace=True
+            self.cfg.records_path, [r.to_dict() for r in fresh], replace=False
         )
         self._append_jsonl(
             self.cfg.data_dir / "quarantine.jsonl",
@@ -208,13 +215,13 @@ class Pipeline:
 
         log.info(
             "persisted: +%d new records (%d total), %d quarantined, %d chunks",
-            len(fresh), len(existing) + len(fresh), len(quarantined), len(chunks),
+            len(fresh), self.state.counts().get("records", 0), len(quarantined), len(chunks),
         )
-        return existing + fresh
+        return fresh
 
     def generate_in_batches(
         self, chunks: list[Chunk], stats: RunStats, full: bool = False
-    ) -> tuple[list[Record], list[Record]]:
+    ) -> list[Record]:
         """Generate, judge and persist in checkpoints of N chunks.
 
         Generation is by far the slowest stage — roughly a minute per chunk on a
@@ -226,12 +233,13 @@ class Pipeline:
         are registered as processed, and it is therefore skipped on the next run.
         Interrupting costs at most one checkpoint.
 
-        Returns (everything now on disk, what this call accepted).
+        Returns the records this call added. Deliberately not the whole corpus:
+        holding every record in memory to hand back to an exporter that reads
+        from disk anyway is what makes a large run expensive.
         """
         every = max(1, self.cfg.generation.checkpoint_every)
         batches = list(chunked(chunks, every))
         deduper = Deduper()          # shared, so questions dedupe across batches
-        all_records: list[Record] = []
         accepted_here: list[Record] = []
         done = 0
 
@@ -244,8 +252,7 @@ class Pipeline:
             stats.records_quarantined += len(quarantined)
             # `full` truncates the output files, so only the first checkpoint may
             # do it — otherwise each one would erase the checkpoints before it.
-            all_records = self.persist(batch, accepted, quarantined, full and i == 0)
-            accepted_here.extend(accepted)
+            accepted_here.extend(self.persist(batch, accepted, quarantined, full and i == 0))
             done += len(batch)
 
             if len(batches) > 1:
@@ -253,7 +260,7 @@ class Pipeline:
                     "checkpoint %d/%d saved — %d/%d chunks done, %d records so far",
                     i + 1, len(batches), done, len(chunks), stats.records,
                 )
-        return all_records, accepted_here
+        return accepted_here
 
     # -- the run ------------------------------------------------------------
 
@@ -293,12 +300,14 @@ class Pipeline:
                     export_all(self.cfg)
                 return stats
 
-            all_records, _ = self.generate_in_batches(chunks, stats, full)
+            self.generate_in_batches(chunks, stats, full)
 
             if export:
-                # chunks=None so the exporter reads the accumulated corpus from
-                # disk — this run's new chunks are only part of it.
-                export_all(self.cfg, all_records, None)
+                # Nothing is passed in: the exporter reads the accumulated
+                # corpus from disk, which is both correct (this run's records
+                # are only part of it) and bounded (one read per run, not one
+                # per checkpoint).
+                export_all(self.cfg)
 
             stats.finished_at = now_iso()
             self.state.finish_run(stats.run_id, asdict(stats), ok=True)
