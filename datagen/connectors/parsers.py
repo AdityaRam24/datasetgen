@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import html
 import io
+import os
 import re
 import zlib
 from html.parser import HTMLParser
+from typing import Callable
 
 from ..util import clean_text, get_logger, zip_member_text
 
@@ -364,6 +366,12 @@ def html_links(raw: str, base_url: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 EXTENSION_MAP = {
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".webp": "image",
+    ".gif": "image",
+    ".bmp": "image",
     ".pdf": "pdf",
     ".docx": "docx",
     ".pptx": "pptx",
@@ -389,6 +397,8 @@ EXTENSION_MAP = {
 
 def parse_bytes(data: bytes, kind: str, url: str = "") -> tuple[str, str]:
     """(title, text) for a blob of a known kind."""
+    if kind == "image":
+        return "", parse_image(data, url)
     if kind == "pdf":
         return "", parse_pdf(data)
     if kind == "docx":
@@ -404,6 +414,49 @@ def parse_bytes(data: bytes, kind: str, url: str = "") -> tuple[str, str]:
     if kind == "json":
         return "", _parse_json(data)
     return "", clean_text(data.decode("utf-8", "replace"))
+
+
+# ---------------------------------------------------------------------------
+# Images
+# ---------------------------------------------------------------------------
+
+# Images are the one format that cannot be parsed — only *described*, by a local
+# vision model. Parsers must stay dependency-free (the test suite runs them with
+# no LLM and no network), so the describer is injected instead of imported:
+# LocalLLM registers itself on construction, and every connector that calls
+# parse_bytes gets image support for free — local files, crawled pages and
+# Confluence attachments alike.
+_IMAGE_DESCRIBER: "Callable[[bytes, str, str], str] | None" = None
+
+IMAGE_MIME = {
+    "image": "image/png", ".png": "image/png", ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif",
+    ".bmp": "image/bmp",
+}
+
+
+def set_image_describer(fn: "Callable[[bytes, str, str], str] | None") -> None:
+    global _IMAGE_DESCRIBER
+    _IMAGE_DESCRIBER = fn
+
+
+def image_support() -> bool:
+    return _IMAGE_DESCRIBER is not None
+
+
+def parse_image(data: bytes, url: str = "") -> str:
+    """Describe an image as text. Empty string when no describer is registered,
+    which makes the document fall out of the pipeline exactly like a scanned PDF
+    with no text layer — nothing crashes, nothing silently ships as garbage."""
+    if _IMAGE_DESCRIBER is None:
+        log.debug("no vision model registered — skipping image %s", url or "<bytes>")
+        return ""
+    ext = os.path.splitext(url.split("?")[0])[1].lower()
+    try:
+        return clean_text(_IMAGE_DESCRIBER(data, url, IMAGE_MIME.get(ext, "image/png")) or "")
+    except Exception as e:  # noqa: BLE001 - a vision failure must not stop a build
+        log.warning("image description failed for %s: %s", url or "<bytes>", e)
+        return ""
 
 
 def _parse_csv(data: bytes) -> str:

@@ -39,6 +39,11 @@ class LLMConfig:
     allow_extractive_fallback: bool = True
     embed_enabled: bool = True
     embed_model: str = "nomic-embed-text"
+    # Vision: screenshots and diagrams are described by a local vision model and
+    # the description is treated as the document's text from then on.
+    vision_enabled: bool = True
+    vision_model: str = "moondream"
+    vision_max_bytes: int = 12 * 1024 * 1024
 
     @property
     def is_local(self) -> bool:
@@ -203,6 +208,10 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         embed_enabled=bool(_get(raw, "llm.embeddings.enabled", True)),
         embed_model=os.getenv("DATAGEN_EMBED_MODEL")
         or _get(raw, "llm.embeddings.model", "nomic-embed-text"),
+        vision_enabled=bool(_get(raw, "llm.vision.enabled", True)),
+        vision_model=os.getenv("DATAGEN_VISION_MODEL")
+        or _get(raw, "llm.vision.model", "moondream"),
+        vision_max_bytes=int(_get(raw, "llm.vision.max_bytes", 12 * 1024 * 1024)),
     )
 
     split = _get(raw, "export.split", {}) or {}

@@ -59,12 +59,18 @@ def cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
     print(f"  base_url     {cfg.llm.base_url}  {'[local]' if cfg.llm.is_local else '[NOT LOCAL]'}")
     print(f"  model        {cfg.llm.model}")
     print(f"  embed model  {cfg.llm.embed_model} ({'on' if cfg.llm.embed_enabled else 'off'})")
+    print(f"  vision model {cfg.llm.vision_model} "
+          f"({'on — images are described' if cfg.llm.vision_enabled else 'off — images skipped'})")
     if llm.available(recheck=True):
         installed = llm.installed_models()
         print(f"  status       reachable, {len(installed)} models installed")
         for m in installed[:12]:
             marker = "  <- generation" if m.startswith(cfg.llm.model.split(":")[0]) else ""
+            if cfg.llm.vision_enabled and m.startswith(cfg.llm.vision_model.split(":")[0]):
+                marker = "  <- images"
             print(f"                 {m}{marker}")
+        # available() resolves a missing model to an installed one, so report
+        # what will actually be used rather than what the file asked for.
         if cfg.llm.model not in installed and installed:
             print(f"  WARNING      {cfg.llm.model!r} is not installed. "
                   f"Run: ollama pull {cfg.llm.model}")

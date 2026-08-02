@@ -16,6 +16,7 @@ returns None and callers fall back to deterministic extraction.
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import threading
@@ -27,6 +28,13 @@ from .config import LLMConfig
 from .util import HttpError, extract_json, get_logger, http_request
 
 log = get_logger("llm")
+
+# Keep this SHORT. Vision models are small — moondream is 1B with a 2048-token
+# context — and a long multi-clause instruction makes them return an empty
+# string rather than a worse answer, which looks like a broken pipeline. Two
+# plain questions get far more out of them than one careful paragraph.
+IMAGE_PROMPT = "Transcribe the text in this image, then say what it shows."
+IMAGE_PROMPT_FALLBACK = "Describe the image."
 
 
 @dataclass
@@ -56,7 +64,32 @@ class LocalLLM:
         self.stats = LLMStats()
         self._available: bool | None = None
         self._embed_checked = False
+        self._vision_checked = False
         self._lock = threading.Lock()
+
+        # Teach the parsers how to read images. Imported here rather than at
+        # module scope so parsers keeps no dependency on this module.
+        if self.cfg.vision_enabled:
+            from .connectors import parsers
+
+            parsers.set_image_describer(self._describe_for_parser)
+
+    def _describe_for_parser(self, data: bytes, url: str, mime: str) -> str:
+        name = (url.rsplit("/", 1)[-1] or "image").split("?")[0]
+        text = self.describe_image(data, prompt=IMAGE_PROMPT, mime=mime)
+        if not text:
+            # Small models answer "Describe the image." when they return nothing
+            # for anything longer. Worth one retry before giving up on the file.
+            text = self.describe_image(data, prompt=IMAGE_PROMPT_FALLBACK, mime=mime)
+        if not text:
+            log.warning("%s produced no description for %s — skipping", self.cfg.vision_model, name)
+            return ""
+        # Two things are recorded on purpose. The filename, because it is often
+        # the only thing tying a screenshot to its subject. And the model,
+        # because unlike every other source this text was *invented* rather than
+        # extracted — there is no original wording to check it against, so
+        # whoever reviews the dataset needs to know it came from a vision model.
+        return f"Image: {name} (described by {self.cfg.vision_model})\n\n{text}"
 
     # -- health -------------------------------------------------------------
 
@@ -106,6 +139,7 @@ class LocalLLM:
             return True  # server reports nothing useful; let the call decide
 
         self._resolve_embed_model(installed)
+        self._resolve_vision_model(installed)
 
         want = self.cfg.model
         if want in installed:
@@ -212,6 +246,29 @@ class LocalLLM:
             want, want,
         )
         self.cfg.embed_enabled = False
+
+    def _resolve_vision_model(self, installed: list[str]) -> None:
+        """Ditto for the vision model. Images are optional material, so a
+        missing one turns image support off rather than failing the run."""
+        if not self.cfg.vision_enabled or self._vision_checked:
+            return
+        self._vision_checked = True
+
+        want = self.cfg.vision_model
+        if want in installed or any(m.startswith(want) for m in installed):
+            return
+
+        seers = [m for m in installed if _looks_like_vision(m)]
+        if seers:
+            pick = min(seers, key=lambda m: (_vision_rank(m), m))
+            log.warning("vision model %r is not installed — using %r for images", want, pick)
+            self.cfg.vision_model = pick
+            return
+
+        log.info(
+            "no vision model installed — images will be skipped. Run: ollama pull %s", want
+        )
+        self.cfg.vision_enabled = False
 
     # -- generation ---------------------------------------------------------
 
@@ -330,6 +387,80 @@ class LocalLLM:
         choices = resp.json().get("choices") or []
         return (choices[0].get("message") or {}).get("content", "") if choices else ""
 
+    # -- vision -------------------------------------------------------------
+
+    def describe_image(self, data: bytes, *, prompt: str, mime: str = "image/png") -> str | None:
+        """Describe an image with the local vision model, or None.
+
+        The description becomes the document's text, so it is asked for as prose
+        a reader could act on — an error dialog's exact message, the boxes and
+        arrows in a topology diagram — not "a screenshot of a terminal".
+        """
+        if not self.cfg.vision_enabled or not data or not self.available():
+            return None
+        if len(data) > self.cfg.vision_max_bytes:
+            log.warning("image is %d bytes — over llm.vision.max_bytes, skipping", len(data))
+            return None
+
+        b64 = base64.b64encode(data).decode("ascii")
+        try:
+            if self.cfg.provider == "ollama":
+                payload = {
+                    "model": self.cfg.vision_model,
+                    "messages": [{"role": "user", "content": prompt, "images": [b64]}],
+                    "stream": False,
+                    "options": {"temperature": 0.1},
+                }
+                resp = http_request(
+                    f"{self.cfg.base_url}/api/chat",
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                    data=json.dumps(payload),
+                    timeout=self.cfg.timeout,
+                    retries=0,
+                )
+                return ((resp.json().get("message") or {}).get("content") or "").strip()
+
+            payload = {
+                "model": self.cfg.vision_model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{mime};base64,{b64}"},
+                            },
+                        ],
+                    }
+                ],
+                "stream": False,
+            }
+            resp = http_request(
+                f"{self.cfg.base_url}/v1/chat/completions",
+                method="POST",
+                headers={"Content-Type": "application/json", "Authorization": "Bearer local"},
+                data=json.dumps(payload),
+                timeout=self.cfg.timeout,
+                retries=0,
+            )
+            choices = resp.json().get("choices") or []
+            return ((choices[0].get("message") or {}).get("content") or "").strip() if choices else ""
+        except (HttpError, ValueError, KeyError, IndexError) as e:
+            if _is_fatal(e):
+                with self._lock:
+                    if self.cfg.vision_enabled:
+                        log.error(
+                            "vision model %r failed (%s) — image support is off for this "
+                            "run. Run: ollama pull %s",
+                            self.cfg.vision_model, e, self.cfg.vision_model,
+                        )
+                    self.cfg.vision_enabled = False
+            else:
+                log.warning("image description failed: %s", e)
+            return None
+
     # -- embeddings ---------------------------------------------------------
 
     def embed(self, texts: list[str]) -> list[list[float]] | None:
@@ -422,6 +553,29 @@ def _family_rank(name: str, want: str) -> int:
 def _looks_like_embedder(name: str, details: dict) -> bool:
     low = f"{name} {details.get('family', '')}".lower()
     return any(h in low for h in _EMBED_HINTS)
+
+
+_VISION_HINTS = ("moondream", "llava", "vision", "bakllava", "minicpm-v", "qwen2-vl",
+                 "qwen2.5vl", "llama3.2-vision", "gemma3", "pixtral")
+
+
+def _looks_like_vision(name: str) -> bool:
+    return any(h in name.lower() for h in _VISION_HINTS)
+
+
+# Substitution order, best first. moondream is deliberately last: it is 1B and
+# it paraphrases technical text rather than transcribing it — fine as a
+# last resort, a poor automatic upgrade from a model you actually chose.
+_VISION_ORDER = ("llava", "qwen2-vl", "qwen2.5vl", "minicpm-v", "llama3.2-vision",
+                 "pixtral", "gemma", "bakllava", "moondream")
+
+
+def _vision_rank(name: str) -> int:
+    low = name.lower()
+    for i, fam in enumerate(_VISION_ORDER):
+        if fam in low:
+            return i
+    return len(_VISION_ORDER)
 
 
 def cosine(a: list[float], b: list[float]) -> float:

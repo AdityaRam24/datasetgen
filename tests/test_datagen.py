@@ -21,6 +21,7 @@ from datagen.analyze import (                                     # noqa: E402
 from datagen.chunking import chunk_document                      # noqa: E402
 from datagen.config import ChunkingConfig, LLMConfig, QualityConfig, load_config  # noqa: E402
 from datagen.connectors.files import read_file                    # noqa: E402
+from datagen.connectors import parsers as parsers_mod                # noqa: E402
 from datagen.connectors.parsers import parse_html, _postprocess_pdf  # noqa: E402
 from datagen.connectors.runbooks import normalize, parse_runbook  # noqa: E402
 from datagen.dedupe import Deduper, hamming, simhash             # noqa: E402
@@ -189,6 +190,67 @@ class TestParsers(unittest.TestCase):
         self.assertIn("endpoint", out)
         self.assertIn("unavailable because", out)
         self.assertNotIn("\n12", out)
+
+
+class TestImages(unittest.TestCase):
+    """Image support without a vision model — the describer is injected, so the
+    whole path is testable with no LLM and no network."""
+
+    PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+    def tearDown(self):
+        parsers_mod.set_image_describer(None)
+
+    def test_images_are_recognised_as_a_kind(self):
+        for ext in (".png", ".jpg", ".jpeg", ".webp"):
+            self.assertEqual(parsers_mod.EXTENSION_MAP.get(ext), "image", ext)
+
+    def test_no_vision_model_yields_no_text_rather_than_an_error(self):
+        parsers_mod.set_image_describer(None)
+        title, text = parsers_mod.parse_bytes(self.PNG, "image", url="shot.png")
+        self.assertEqual(text, "")
+        self.assertEqual(title, "")
+
+    def test_description_becomes_the_document_text(self):
+        seen = {}
+
+        def fake(data, url, mime):
+            seen.update(bytes=len(data), url=url, mime=mime)
+            return "The dialog reads: MLIS endpoint returned 503 Service Unavailable."
+
+        parsers_mod.set_image_describer(fake)
+        _, text = parsers_mod.parse_bytes(self.PNG, "image", url="http://x/mlis-503.png")
+        self.assertIn("503 Service Unavailable", text)
+        self.assertEqual(seen["mime"], "image/png")
+        self.assertEqual(seen["bytes"], len(self.PNG))
+
+    def test_mime_follows_the_extension(self):
+        got = {}
+        parsers_mod.set_image_describer(lambda d, u, m: got.setdefault("mime", m) or "ok text")
+        parsers_mod.parse_bytes(self.PNG, "image", url="/a/b/diagram.jpg?v=2")
+        self.assertEqual(got["mime"], "image/jpeg")
+
+    def test_a_failing_vision_model_does_not_break_the_build(self):
+        def boom(data, url, mime):
+            raise RuntimeError("model exploded")
+
+        parsers_mod.set_image_describer(boom)
+        _, text = parsers_mod.parse_bytes(self.PNG, "image", url="x.png")
+        self.assertEqual(text, "")
+
+    def test_short_description_survives_chunking(self):
+        # A screenshot description is often well under chunking.min_chars; it is
+        # the document's entire content, so it must not be dropped.
+        doc = Document.make(
+            title="mlis-503.png",
+            url="file:///corpus/docs/mlis-503.png",
+            text="Image: mlis-503.png\n\nThe console shows 503 Service Unavailable.",
+            kind="image",
+            source="local-docs",
+        )
+        chunks = chunk_document(doc, ChunkingConfig())
+        self.assertEqual(len(chunks), 1)
+        self.assertIn("503", chunks[0].text)
 
 
 class TestQuality(unittest.TestCase):

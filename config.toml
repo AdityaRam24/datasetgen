@@ -42,6 +42,25 @@ enabled  = true
 model    = "nomic-embed-text"
 # Embeddings are used for semantic near-duplicate detection and coverage gaps.
 
+# Vision. Screenshots and diagrams cannot be parsed, only described — this model
+# describes them and that description becomes the document's text. Applies to
+# images in corpus/docs, images the crawler finds, and Confluence attachments.
+#
+# READ THE README SECTION BEFORE TRUSTING THIS. A description is the only source
+# an image record has, so a misread cannot be caught by the grounding check the
+# way a bad answer about a PDF can. Measured here, moondream turned
+# "503 Service Unavailable" into "5003 SERVICE UNABILIOUS" and invented a disk
+# space error that was not in the picture.
+#
+#   ollama pull moondream        # 1.7 GB, fast — triage only, mangles identifiers
+#   ollama pull llava            # use this for anything you will fine-tune on
+#
+# If no vision model is installed, images are skipped with one log line.
+[llm.vision]
+enabled   = true
+model     = "moondream"
+max_bytes = 12582912             # 12 MB ceiling per image
+
 # -----------------------------------------------------------------------------
 # Chunking
 # -----------------------------------------------------------------------------
@@ -101,6 +120,9 @@ path    = "corpus/docs"
 globs   = [
   "**/*.pdf", "**/*.docx", "**/*.pptx", "**/*.xlsx",
   "**/*.md", "**/*.txt", "**/*.html", "**/*.csv", "**/*.json",
+  # Screenshots and diagrams: described by the local vision model
+  # ([llm.vision]) and the description is used as the document text.
+  "**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.webp",
 ]
 tags    = ["docs"]
 

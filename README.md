@@ -62,9 +62,9 @@ variants and `rag_chunks.jsonl`.
    PDFs ─┐    │  files      local documents    │
   DOCX  ─┤    │  runbooks   procedures         │        ┌── quality gate ──┐
   PPTX  ─┼───▶│  confluence your wiki          │───┐    │ heuristics       │
-   web  ─┤    │  web        crawl + robots.txt │   │    │ grounding check  │
-keyword ─┘    │  keywords   search & scrape    │   │    │ local LLM judge  │
-              └────────────────────────────────┘   │    └──────────────────┘
+ images ─┤    │  web        crawl + robots.txt │   │    │ grounding check  │
+   web  ─┤    │  keywords   search & scrape    │   │    │ local LLM judge  │
+keyword ─┘    └────────────────────────────────┘   │    └──────────────────┘
                                                    ▼             │
                         documents ─▶ chunks ─▶ dedupe ─▶ generate ─▶ accepted
                                                 (3 layers)  (local)      │
@@ -293,8 +293,76 @@ is committed to SQLite after every step.
 Configure in `config.toml`. Each block has a `name` and optional `tags` that follow the
 data all the way into the exported records.
 
-**`[[sources.files]]`** — PDF, DOCX, PPTX, XLSX, MD, TXT, HTML, CSV, JSON, code.
-Drop files into `corpus/docs/`.
+**`[[sources.files]]`** — PDF, DOCX, PPTX, XLSX, MD, TXT, HTML, CSV, JSON, code, **and
+images**. Drop files into `corpus/docs/`.
+
+### Screenshots and diagrams
+
+An image cannot be parsed, only *described*, so `[llm.vision]` points at a local vision
+model and its description becomes the document's text — chunked, generated from and
+quality-gated exactly like a PDF's.
+
+```toml
+[llm.vision]
+enabled = true
+model   = "moondream"     # 1.7 GB, fast, good at reading screenshots
+                          # llava is bigger and better on diagrams
+```
+
+```bash
+ollama pull moondream
+python -m datagen ingest ./mlis-503-error.png
+```
+
+The prompt is written for this material specifically: transcribe every error message, log
+line, command and label *exactly as written*; for a diagram, name the components and say
+how they connect; don't describe the window chrome or the cursor. Asking a vision model to
+"describe this image" gets you "a screenshot of a computer screen", which is worth nothing
+in a training set.
+
+This applies everywhere `parse_bytes` is used, not just local files — images the crawler
+finds and **Confluence attachments** go through the same path, which matters because
+wiki pages document failures with screenshots more often than with text.
+
+The filename is kept as a heading (`Image: mlis-503-error.png`), since it is often the only
+thing tying a screenshot to its subject.
+
+### Read this before you trust image records
+
+**A vision model does not transcribe, it paraphrases — and an image description is the
+only source there is.** Every other record in this dataset can be checked against its
+source text by the grounding score. An image record cannot: the description *is* the
+source, so if the model misread it, the record is confidently wrong and nothing downstream
+will catch it.
+
+Measured on a clean 520×140 PNG of black text on white, with `moondream`:
+
+| In the image | `moondream` read |
+|---|---|
+| `ERROR: MLIS endpoint returned` | `ERR MIB END POINT RETURNS` |
+| `503 Service Unavailable` | `5003 SERVICE UNABILIOUS` |
+| `pod mlis-7f9c in CrashLoopBackOff` | `pod mics 776 in Crash Loopback.off` |
+
+It also volunteered "insufficient disk space" and "a hardware or software failure", neither
+of which is in the image. Train on that and you teach the assistant the error code `5003`.
+
+So:
+
+- **`moondream` (1B) is for triage, not for training data.** It gets the gist and mangles
+  every identifier. `ollama pull llava` for anything you intend to fine-tune on; when the
+  configured model is missing, substitution prefers the capable models and picks moondream
+  last, deliberately.
+- **Image-derived text is labelled.** Every one starts `Image: <filename> (described by
+  <model>)`, so you can find them: `python -m datagen inspect --kind image`, or filter
+  `data/chunks.jsonl` on `"kind": "image"`.
+- **For a screenshot that really matters, type it yourself.** `datagen learn --problem/
+  --resolution` stores your words verbatim, bypasses generation, and scores 1.0. Thirty
+  seconds of typing beats a paraphrase you have to audit.
+
+Other limits: images over `max_bytes` (12 MB) are skipped; long prompts make small vision
+models return *nothing*, so the prompt is deliberately two short sentences with a
+one-sentence retry behind it; with no vision model installed, images are skipped with one
+log line and everything else runs normally.
 
 **`[[sources.runbooks]]`** — parsed *structurally*, not as flat text. The connector
 recognises symptom / cause / preconditions / steps / verification / rollback / escalation
@@ -493,6 +561,7 @@ Every dependency is optional and probed at runtime:
 |---|---|
 | **`llm.model` is not pulled** | Resolved automatically: first by tag (`qwen2.5:7b-instruct` matches an installed `…-q4_K_M`), then to the closest installed chat model of the same family. Embedding and vision models are ranked last so they can never be picked to write your dataset. One warning line names the substitute and the `ollama pull` that would avoid it |
 | **`embeddings.model` is not pulled** | Substituted with any installed embedder, or embeddings are switched off for the run — semantic dedupe goes with them, exact and SimHash stay |
+| **`vision.model` is not pulled** | Substituted with any installed vision model, else image support turns off and images are skipped with one line. Everything else runs |
 | **The local model is down** | A one-shot `build` falls back to extractive generation: headings become questions, ordered steps become procedures, error lines become troubleshooting prompts. Grounded by construction — the answer *is* the source text. Set `allow_extractive_fallback = false` to hard-fail instead. **`watch` does not do this** — it skips the cycle (see below) |
 | A call fails fatally (404 / 401 / model not found) | The LLM is disabled for the rest of the run after **one** error line, instead of retrying per chunk. A missing model used to cost 20 minutes of identical 404s |
 | `pypdf` | A built-in extractor inflates FlateDecode streams and reads the text operators. Fine for digital PDFs, no OCR |
