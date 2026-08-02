@@ -104,6 +104,11 @@ pairs_per_chunk    = 6
 max_workers        = 4
 include_citations  = true       # every record carries source url/title/chunk id
 skip_if_unchanged  = true       # incremental: only regenerate for changed chunks
+# Write results to disk every N chunks. Generation runs about a minute per chunk
+# on a 7B model, so a 100-chunk run is hours long; without checkpoints a Ctrl-C
+# at 95% throws away 95% of the work. Each checkpoint is complete and is skipped
+# on the next run, so an interrupt costs at most this many chunks.
+checkpoint_every   = 25
 
 # -----------------------------------------------------------------------------
 # Quality gate (LLM-as-judge, also local)

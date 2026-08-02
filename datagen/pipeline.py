@@ -212,6 +212,49 @@ class Pipeline:
         )
         return existing + fresh
 
+    def generate_in_batches(
+        self, chunks: list[Chunk], stats: RunStats, full: bool = False
+    ) -> tuple[list[Record], list[Record]]:
+        """Generate, judge and persist in checkpoints of N chunks.
+
+        Generation is by far the slowest stage — roughly a minute per chunk on a
+        7B model — so a hundred-chunk run is hours long. Doing all of it before
+        the first write means a Ctrl-C at 95% throws away 95% of the work, which
+        is exactly what a long unattended run cannot afford.
+
+        Each checkpoint is a complete unit: its records are written, its chunks
+        are registered as processed, and it is therefore skipped on the next run.
+        Interrupting costs at most one checkpoint.
+
+        Returns (everything now on disk, what this call accepted).
+        """
+        every = max(1, self.cfg.generation.checkpoint_every)
+        batches = list(chunked(chunks, every))
+        deduper = Deduper()          # shared, so questions dedupe across batches
+        all_records: list[Record] = []
+        accepted_here: list[Record] = []
+        done = 0
+
+        for i, batch in enumerate(batches):
+            records = generate_all(batch, self.llm, self.cfg, stats)
+            records = deduper.dedupe_records(records)
+            accepted, quarantined = evaluate(records, self.llm, self.cfg.quality)
+
+            stats.records += len(accepted)
+            stats.records_quarantined += len(quarantined)
+            # `full` truncates the output files, so only the first checkpoint may
+            # do it — otherwise each one would erase the checkpoints before it.
+            all_records = self.persist(batch, accepted, quarantined, full and i == 0)
+            accepted_here.extend(accepted)
+            done += len(batch)
+
+            if len(batches) > 1:
+                log.info(
+                    "checkpoint %d/%d saved — %d/%d chunks done, %d records so far",
+                    i + 1, len(batches), done, len(chunks), stats.records,
+                )
+        return all_records, accepted_here
+
     # -- the run ------------------------------------------------------------
 
     def run(
@@ -250,16 +293,7 @@ class Pipeline:
                     export_all(self.cfg)
                 return stats
 
-            records = generate_all(chunks, self.llm, self.cfg, stats)
-
-            deduper = Deduper()
-            records = deduper.dedupe_records(records)
-
-            accepted, quarantined = evaluate(records, self.llm, self.cfg.quality)
-            stats.records = len(accepted)
-            stats.records_quarantined = len(quarantined)
-
-            all_records = self.persist(chunks, accepted, quarantined, full)
+            all_records, _ = self.generate_in_batches(chunks, stats, full)
 
             if export:
                 # chunks=None so the exporter reads the accumulated corpus from

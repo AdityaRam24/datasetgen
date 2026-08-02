@@ -76,6 +76,13 @@ keyword ─┘    └───────────────────�
 **Everything is incremental.** Content hashes live in SQLite, so a re-run skips documents
 that have not changed and only regenerates what actually moved.
 
+**Everything is checkpointed.** Generation costs roughly a minute per chunk on a 7B model,
+so a hundred-chunk run takes hours. Records are written every
+`generation.checkpoint_every` chunks (25 by default) rather than once at the end, and a
+chunk is marked processed only after its records are on disk. Interrupting — Ctrl-C, a
+crash, a machine reboot — costs at most one checkpoint, and the next run resumes from
+there rather than starting over.
+
 ---
 
 ## Commands
@@ -255,6 +262,12 @@ consecutive-error budget, a repeat detector that blocks identical calls, and a
 **heuristic planner** that takes over if the model returns garbage three times running.
 The heuristic planner drives the same tools in a fixed sensible order, so
 `agent` still works with no model at all.
+
+`assess_coverage` also reports `documents_awaiting_generation`. Without it the planner
+falls into a loop it cannot see: coverage looks thin, so it gathers more, reassesses, and
+reads "thin" again — because coverage *cannot* improve until `build_dataset` runs. Observed
+burning all 24 steps that way, gathering 20 documents and generating from none of them.
+When documents are queued the tool now says so explicitly, and says what to call next.
 
 ### How it updates itself
 

@@ -87,6 +87,9 @@ class GenerationConfig:
     max_workers: int = 4
     include_citations: bool = True
     skip_if_unchanged: bool = True
+    # Write results every N chunks. An interrupted run then loses at most this
+    # much work instead of everything since it started.
+    checkpoint_every: int = 25
 
 
 @dataclass
@@ -250,6 +253,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
             max_workers=int(_get(raw, "generation.max_workers", 4)),
             include_citations=bool(_get(raw, "generation.include_citations", True)),
             skip_if_unchanged=bool(_get(raw, "generation.skip_if_unchanged", True)),
+            checkpoint_every=int(_get(raw, "generation.checkpoint_every", 25)),
         ),
         quality=QualityConfig(
             enabled=bool(_get(raw, "quality.enabled", True)),

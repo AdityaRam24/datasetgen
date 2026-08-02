@@ -35,7 +35,7 @@ from datagen.generators import (                                  # noqa: E402
     _extractive_glossary, is_useful_term, system_prompt,
 )
 from datagen.learn import case_record, document_from_text, pair_record  # noqa: E402
-from datagen.models import Chunk, Document, Record               # noqa: E402
+from datagen.models import Chunk, Document, Record, RunStats     # noqa: E402
 from datagen.quality import grounding_score, heuristic_check     # noqa: E402
 from datagen.state import StateStore, _to_signed64, _to_unsigned64  # noqa: E402
 from datagen.web import (                                         # noqa: E402
@@ -251,6 +251,99 @@ class TestImages(unittest.TestCase):
         chunks = chunk_document(doc, ChunkingConfig())
         self.assertEqual(len(chunks), 1)
         self.assertIn("503", chunks[0].text)
+
+
+class TestCheckpoints(unittest.TestCase):
+    """Generation writes every `checkpoint_every` chunks, so an interrupted run
+    keeps the completed batches instead of losing hours of work."""
+
+    def _pipeline(self, tmp, every):
+        from datagen.llm import LocalLLM
+        from datagen.pipeline import Pipeline
+
+        cfg = load_config(None)
+        cfg.root = Path(tmp)
+        cfg.data_dir = Path(tmp) / "data"
+        cfg.llm.provider = "none"          # extractive only: no model needed
+        cfg.llm.vision_enabled = False
+        cfg.generation.checkpoint_every = every
+        cfg.quality.enabled = False
+        cfg.ensure_dirs()
+        state = StateStore(cfg.state_db)
+        return Pipeline(cfg, state, LocalLLM(cfg.llm)), cfg, state
+
+    def _chunks(self, n):
+        out = []
+        for i in range(n):
+            doc = Document.make(
+                title=f"doc {i}",
+                url=f"file:///d{i}.md",
+                text=f"Heading {i}\n\nThe MLIS endpoint returned 503 Service Unavailable "
+                     f"because replica {i} was not ready. Restart it to recover.",
+                kind="markdown",
+                source="test",
+            )
+            out.extend(chunk_document(doc, ChunkingConfig()))
+        return out
+
+    def test_each_checkpoint_is_written_before_the_next_starts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pipe, cfg, state = self._pipeline(tmp, every=2)
+            chunks = self._chunks(6)
+            self.assertGreaterEqual(len(chunks), 6)
+
+            writes = []
+            real_persist = pipe.persist
+
+            def spy(batch, accepted, quarantined, full=False):
+                writes.append(len(batch))
+                return real_persist(batch, accepted, quarantined, full)
+
+            pipe.persist = spy
+            try:
+                pipe.generate_in_batches(chunks, RunStats(run_id="ckpt"), full=True)
+            finally:
+                state.close()
+
+            # One write per checkpoint, not one write at the very end.
+            self.assertGreater(len(writes), 1, "expected multiple checkpoints")
+            self.assertEqual(sum(writes), len(chunks))
+            self.assertTrue(all(w <= 2 for w in writes), writes)
+
+    def test_an_interrupt_keeps_the_completed_checkpoints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pipe, cfg, state = self._pipeline(tmp, every=2)
+            chunks = self._chunks(8)
+
+            calls = {"n": 0}
+            real_persist = pipe.persist
+
+            def blow_up_on_third(batch, accepted, quarantined, full=False):
+                calls["n"] += 1
+                if calls["n"] == 3:
+                    raise KeyboardInterrupt("user pressed Ctrl-C mid-run")
+                return real_persist(batch, accepted, quarantined, full)
+
+            pipe.persist = blow_up_on_third
+            try:
+                with self.assertRaises(KeyboardInterrupt):
+                    pipe.generate_in_batches(chunks, RunStats(run_id="ckpt2"), full=True)
+
+                # The first two checkpoints survived the interrupt.
+                saved = [
+                    line for line in
+                    (cfg.records_path.read_text(encoding="utf-8").splitlines()
+                     if cfg.records_path.exists() else [])
+                    if line.strip()
+                ]
+                self.assertGreater(len(saved), 0, "completed checkpoints were lost")
+
+                # And their chunks are registered, so a re-run skips them.
+                done = {c.id for c in chunks[:4]}
+                registered = {cid for cid, _ in state.all_simhashes()}
+                self.assertTrue(done & registered, "finished chunks were not registered")
+            finally:
+                state.close()
 
 
 class TestQuality(unittest.TestCase):

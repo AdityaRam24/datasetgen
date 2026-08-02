@@ -325,25 +325,24 @@ def _build_dataset(ctx: ToolContext, args: dict) -> dict:
         return {"ok": True, "chunks": 0, "records": 0,
                 "note": "everything gathered was a duplicate of existing material"}
 
-    records = generate_all(chunks, ctx.llm, ctx.cfg, ctx.stats)
-    records = Deduper().dedupe_records(records)
-    accepted, quarantined = evaluate(records, ctx.llm, ctx.cfg.quality)
-
-    # Persist immediately: if the agent runs out of steps or the planner wanders
-    # off, the work is already safe on disk.
-    pipeline.persist(chunks, accepted, quarantined)
+    # Checkpointed: each batch of chunks is generated, judged and written before
+    # the next starts. An agent that runs out of steps, a planner that wanders
+    # off, or a Ctrl-C two hours in all keep everything up to the last
+    # checkpoint. generate_in_batches updates stats itself, so the counts for
+    # this call come from the difference rather than being added again.
+    rejected_before = ctx.stats.records_quarantined
+    _, accepted = pipeline.generate_in_batches(chunks, ctx.stats)
+    quarantined = ctx.stats.records_quarantined - rejected_before
 
     ctx.chunks.extend(chunks)
     ctx.records.extend(accepted)
-    ctx.stats.records += len(accepted)
-    ctx.stats.records_quarantined += len(quarantined)
     ctx.documents.clear()
 
     return {
         "ok": True,
         "chunks": len(chunks),
         "records": len(accepted),
-        "quarantined": len(quarantined),
+        "quarantined": quarantined,
         "mean_score": round(sum(r.score or 0 for r in accepted) / max(1, len(accepted)), 3),
         "note": "written to disk; call export_dataset when you are done gathering",
     }
@@ -372,10 +371,17 @@ def _assess_coverage(ctx: ToolContext, args: dict) -> dict:
                 topics[token] = topics.get(token, 0) + 1
     top = sorted(topics.items(), key=lambda kv: -kv[1])[:25]
 
-    return {
+    # Documents collected this run that have not been generated from yet.
+    # Without this the planner reads "coverage is thin", gathers more, reassesses,
+    # reads "thin" again — a loop it cannot escape, because coverage cannot
+    # improve until build_dataset runs. It burned all 24 steps that way.
+    pending_docs = len(ctx.documents)
+
+    out = {
         "ok": True,
         "totals": counts,
         "records_this_run": len(ctx.records),
+        "documents_awaiting_generation": pending_docs,
         "by_kind": by_kind,
         "by_source": by_source,
         "frequent_topics": [t for t, _ in top],
@@ -384,6 +390,13 @@ def _assess_coverage(ctx: ToolContext, args: dict) -> dict:
         ],
         "pending_leads": len(ctx.state.pending()),
     }
+    if pending_docs:
+        out["next_step"] = (
+            f"{pending_docs} gathered document(s) have not been turned into records "
+            "yet. Call build_dataset now — gathering more before that cannot change "
+            "what this report says."
+        )
+    return out
 
 
 @tool(
