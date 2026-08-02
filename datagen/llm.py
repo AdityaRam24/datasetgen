@@ -65,7 +65,12 @@ class LocalLLM:
         self._available: bool | None = None
         self._embed_checked = False
         self._vision_checked = False
+        self._caps: dict[str, set[str]] = {}
         self._lock = threading.Lock()
+        # Separate lock on purpose: capabilities() is called from inside
+        # available(), which already holds _lock, and threading.Lock is not
+        # reentrant — sharing one would deadlock the whole run on startup.
+        self._caps_lock = threading.Lock()
 
         # Teach the parsers how to read images. Imported here rather than at
         # module scope so parsers keeps no dependency on this module.
@@ -229,7 +234,14 @@ class LocalLLM:
         self._embed_checked = True
 
         want = self.cfg.embed_model
-        if want in installed or any(m.startswith(want) for m in installed):
+        concrete = next(
+            (m for m in installed if m == want or m == f"{want}:latest" or m.startswith(want)),
+            "",
+        )
+        if concrete:
+            # Pin the exact tag: a bare "gemma4" is not resolvable on a machine
+            # whose only tag is "gemma4:12b".
+            self.cfg.embed_model = concrete
             return
 
         embedders = [m for m in installed if _looks_like_embedder(m, {})]
@@ -247,26 +259,85 @@ class LocalLLM:
         )
         self.cfg.embed_enabled = False
 
+    def capabilities(self, model: str) -> set[str]:
+        """What a model can actually do, straight from the daemon.
+
+        Ollama reports this ("completion", "vision", "tools", …), which beats
+        inferring it from the name: `gemma4:12b` can see and `gemma2:2b` cannot,
+        and no amount of string matching on "gemma" gets that right.
+        Non-Ollama servers have no equivalent, so callers fall back to names.
+        """
+        if self.cfg.provider != "ollama":
+            return set()
+        with self._caps_lock:
+            if model in self._caps:
+                return self._caps[model]
+        try:
+            data = http_request(
+                f"{self.cfg.base_url}/api/show",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                data=json.dumps({"model": model}),
+                timeout=30,
+                retries=0,
+            ).json()
+            caps = {str(c).lower() for c in (data.get("capabilities") or [])}
+        except (HttpError, ValueError, KeyError, TypeError):
+            caps = set()
+        with self._caps_lock:
+            self._caps[model] = caps
+        return caps
+
+    def _can_see(self, model: str) -> bool:
+        caps = self.capabilities(model)
+        return "vision" in caps if caps else _looks_like_vision(model)
+
     def _resolve_vision_model(self, installed: list[str]) -> None:
-        """Ditto for the vision model. Images are optional material, so a
-        missing one turns image support off rather than failing the run."""
+        """Pick a model that can actually read an image.
+
+        Two ways to get this wrong, both silent: naming a model that is not
+        installed, and naming one that is installed but cannot see. Both end in
+        every image being skipped with no obvious cause.
+        """
         if not self.cfg.vision_enabled or self._vision_checked:
             return
         self._vision_checked = True
 
         want = self.cfg.vision_model
-        if want in installed or any(m.startswith(want) for m in installed):
+        # Normalise to the concrete tag: "gemma4" is not a valid model name on a
+        # machine that only has "gemma4:12b" — there is no :latest to fall back on.
+        concrete = next(
+            (m for m in installed if m == want or m == f"{want}:latest" or m.startswith(want)),
+            "",
+        )
+        if concrete and self._can_see(concrete):
+            if concrete != want:
+                log.info("vision model %r -> %r", want, concrete)
+                self.cfg.vision_model = concrete
             return
 
-        seers = [m for m in installed if _looks_like_vision(m)]
-        if seers:
-            pick = min(seers, key=lambda m: (_vision_rank(m), m))
-            log.warning("vision model %r is not installed — using %r for images", want, pick)
-            self.cfg.vision_model = pick
-            return
+        # Probe in preference order and stop at the first model that can see.
+        # /api/show costs a couple of seconds per model, so asking about all of
+        # them would put 20s of startup cost on every run that needs a fallback.
+        # Within a family, smallest first: an image costs ~45s on a 12B model and
+        # every screenshot in the corpus pays it, so a 31B is not an upgrade.
+        sizes = {m["name"]: m["bytes"] for m in self.model_catalog()}
+        for candidate in sorted(
+            installed, key=lambda m: (_vision_rank(m), sizes.get(m, 0), m)
+        ):
+            if _vision_rank(candidate) >= len(_VISION_ORDER) and not _looks_like_vision(candidate):
+                continue  # not a plausible vision model; do not pay to ask
+            if self._can_see(candidate):
+                reason = "is not installed" if not concrete else "cannot process images"
+                log.warning(
+                    "vision model %r %s — using %r for images", want, reason, candidate
+                )
+                self.cfg.vision_model = candidate
+                return
 
         log.info(
-            "no vision model installed — images will be skipped. Run: ollama pull %s", want
+            "no vision-capable model installed — images will be skipped. Run: ollama pull %s",
+            want,
         )
         self.cfg.vision_enabled = False
 
@@ -555,19 +626,30 @@ def _looks_like_embedder(name: str, details: dict) -> bool:
     return any(h in low for h in _EMBED_HINTS)
 
 
+# Only a fallback, for servers that do not report capabilities (LM Studio,
+# llama.cpp). With Ollama the daemon is asked directly — see capabilities().
 _VISION_HINTS = ("moondream", "llava", "vision", "bakllava", "minicpm-v", "qwen2-vl",
-                 "qwen2.5vl", "llama3.2-vision", "gemma3", "pixtral")
+                 "qwen2.5vl", "llama3.2-vision", "gemma3", "gemma4", "pixtral")
 
 
 def _looks_like_vision(name: str) -> bool:
     return any(h in name.lower() for h in _VISION_HINTS)
 
 
-# Substitution order, best first. moondream is deliberately last: it is 1B and
-# it paraphrases technical text rather than transcribing it — fine as a
-# last resort, a poor automatic upgrade from a model you actually chose.
-_VISION_ORDER = ("llava", "qwen2-vl", "qwen2.5vl", "minicpm-v", "llama3.2-vision",
-                 "pixtral", "gemma", "bakllava", "moondream")
+# Substitution order, best first — measured, not assumed. On a clean PNG of
+# "ERROR: MLIS endpoint returned / 503 Service Unavailable / pod mlis-7f9c in
+# CrashLoopBackOff":
+#
+#   gemma4     6/6 identifiers, nothing invented          ~45s
+#   moondream  0-1/6, read "503" as "5003"                 ~5s
+#   llava      0/6, invented "Unable to connect to server,
+#              check your internet connection" outright   ~25s
+#
+# llava's reputation put it first in an earlier version of this list; the
+# measurement moved it below moondream's family, because inventing a plausible
+# different error is worse for a training set than garbling the real one.
+_VISION_ORDER = ("gemma", "qwen2-vl", "qwen2.5vl", "minicpm-v", "llama3.2-vision",
+                 "pixtral", "moondream", "llava", "bakllava")
 
 
 def _vision_rank(name: str) -> int:

@@ -52,13 +52,22 @@ model    = "nomic-embed-text"
 # "503 Service Unavailable" into "5003 SERVICE UNABILIOUS" and invented a disk
 # space error that was not in the picture.
 #
-#   ollama pull moondream        # 1.7 GB, fast — triage only, mangles identifiers
-#   ollama pull llava            # use this for anything you will fine-tune on
+# Measured on a clean PNG reading "ERROR: MLIS endpoint returned / 503 Service
+# Unavailable / pod mlis-7f9c in CrashLoopBackOff":
 #
-# If no vision model is installed, images are skipped with one log line.
+#   gemma4     every identifier correct, nothing invented        ~45s/image
+#   moondream  read "503" as "5003", invented a disk-space error  ~5s/image
+#   llava      invented "Unable to connect to server" wholesale  ~25s/image
+#
+# So: gemma4. It is slow per image, and that is the right trade — a wrong
+# transcription cannot be caught later, because the description IS the source.
+# The model is resolved against what Ollama reports it can do, so "gemma4" finds
+# gemma4:12b or gemma4:latest, whichever this machine has.
+#
+# If no vision-capable model is installed, images are skipped with one log line.
 [llm.vision]
 enabled   = true
-model     = "moondream"
+model     = "gemma4"
 max_bytes = 12582912             # 12 MB ceiling per image
 
 # -----------------------------------------------------------------------------

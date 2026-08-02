@@ -42,7 +42,7 @@ class LLMConfig:
     # Vision: screenshots and diagrams are described by a local vision model and
     # the description is treated as the document's text from then on.
     vision_enabled: bool = True
-    vision_model: str = "moondream"
+    vision_model: str = "gemma4"
     vision_max_bytes: int = 12 * 1024 * 1024
 
     @property
@@ -210,7 +210,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         or _get(raw, "llm.embeddings.model", "nomic-embed-text"),
         vision_enabled=bool(_get(raw, "llm.vision.enabled", True)),
         vision_model=os.getenv("DATAGEN_VISION_MODEL")
-        or _get(raw, "llm.vision.model", "moondream"),
+        or _get(raw, "llm.vision.model", "gemma4"),
         vision_max_bytes=int(_get(raw, "llm.vision.max_bytes", 12 * 1024 * 1024)),
     )
 

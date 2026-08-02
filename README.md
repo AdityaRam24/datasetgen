@@ -305,14 +305,21 @@ quality-gated exactly like a PDF's.
 ```toml
 [llm.vision]
 enabled = true
-model   = "moondream"     # 1.7 GB, fast, good at reading screenshots
-                          # llava is bigger and better on diagrams
+model   = "gemma4"        # resolved against what Ollama says each model can do,
+                          # so this finds gemma4:12b or gemma4:latest either way
 ```
 
 ```bash
-ollama pull moondream
+ollama pull gemma4
 python -m datagen ingest ./mlis-503-error.png
 ```
+
+The model is chosen by **capability, not by name**: `/api/show` reports whether a model can
+see, so `gemma4:12b` is correctly identified as vision-capable and `gemma2:2b` is not —
+which no amount of string-matching on "gemma" would get right. If the configured model is
+missing *or* turns out to be text-only, the best installed vision model is used instead,
+smallest-first within a family (every image pays the inference cost, so a 31B is not an
+upgrade over a 12B).
 
 The prompt is written for this material specifically: transcribe every error message, log
 line, command and label *exactly as written*; for a diagram, name the components and say
@@ -335,29 +342,28 @@ source text by the grounding score. An image record cannot: the description *is*
 source, so if the model misread it, the record is confidently wrong and nothing downstream
 will catch it.
 
-Measured on a clean 520×140 PNG of black text on white, with `moondream`:
+Measured on a clean 520×140 PNG reading `ERROR: MLIS endpoint returned` / `503 Service
+Unavailable` / `pod mlis-7f9c in CrashLoopBackOff`. Six identifiers to get right:
 
-| In the image | `moondream` read |
-|---|---|
-| `ERROR: MLIS endpoint returned` | `ERR MIB END POINT RETURNS` |
-| `503 Service Unavailable` | `5003 SERVICE UNABILIOUS` |
-| `pod mlis-7f9c in CrashLoopBackOff` | `pod mics 776 in Crash Loopback.off` |
+| Model | Correct | Invented | Speed |
+|---|---|---|---|
+| **`gemma4`** | **6/6** — every identifier exact | nothing | ~45 s |
+| `moondream` (1B) | 0–1/6 — read `503` as `5003`, `mlis-7f9c` as `mics 776` | "insufficient disk space" | ~5 s |
+| `llava` (7B) | 0/6 | *"Unable to connect to server. Please check your internet connection"* — an error that appears nowhere in the image | ~25 s |
 
-It also volunteered "insufficient disk space" and "a hardware or software failure", neither
-of which is in the image. Train on that and you teach the assistant the error code `5003`.
+Two things worth taking from that table. `llava`'s reputation had it first in the
+substitution order until it was actually measured; **inventing a plausible, entirely
+different error is worse for a training set than garbling the real one**, so it now ranks
+below moondream. And gemma4's ~45 s per image is the right trade: a wrong transcription
+cannot be caught downstream, because the description *is* the source.
 
-So:
-
-- **`moondream` (1B) is for triage, not for training data.** It gets the gist and mangles
-  every identifier. `ollama pull llava` for anything you intend to fine-tune on; when the
-  configured model is missing, substitution prefers the capable models and picks moondream
-  last, deliberately.
+- **Use `gemma4` (or another 12B+ vision model) for anything you will train on.** A 1B
+  model is for triage.
 - **Image-derived text is labelled.** Every one starts `Image: <filename> (described by
-  <model>)`, so you can find them: `python -m datagen inspect --kind image`, or filter
-  `data/chunks.jsonl` on `"kind": "image"`.
+  <model>)`, so you can audit them — filter `data/chunks.jsonl` on `"kind": "image"`.
 - **For a screenshot that really matters, type it yourself.** `datagen learn --problem/
   --resolution` stores your words verbatim, bypasses generation, and scores 1.0. Thirty
-  seconds of typing beats a paraphrase you have to audit.
+  seconds of typing beats a transcription you have to audit.
 
 Other limits: images over `max_bytes` (12 MB) are skipped; long prompts make small vision
 models return *nothing*, so the prompt is deliberately two short sentences with a
